@@ -1,0 +1,742 @@
+---
+title: "El Nino"
+author: "Gabriele S. | Francesco P."
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r include=FALSE}
+# Funzioni
+
+prova_modelli_arma <- function(data, var, max_p = 3, max_q = 3) {
+  
+  # Tutte le combinazioni di p e q
+  combinazioni <- expand.grid(p = 0:max_p, q = 0:max_q)
+  
+  risultati <- map2_df(combinazioni$p, combinazioni$q, function(p, q) {
+    # Prova a stimare il modello, gestendo eventuali errori
+    fit <- tryCatch({
+      model(data, ARIMA(reformulate(response = var,
+                                    termlabels = paste0("pdq(", p, ",0,", q, ")"))))
+    }, error = function(e) NULL)
+    
+    if (!is.null(fit)) {
+      # Usa glance() per estrarre i criteri di informazione
+      metrics <- glance(fit)
+      tibble(
+        p = p,
+        q = q,
+        AIC = metrics$AIC,
+        AICc = metrics$AICc,
+        BIC = metrics$BIC,
+        logLik = metrics$log_lik
+      )
+    } else {
+      tibble(p = p, q = q, AIC = NA, AICc = NA, BIC = NA, logLik = NA)
+    }
+  })
+  
+  risultati %>% arrange(AIC)
+}
+
+# Funzioni per U1 e U2
+U1 <- function(prev, val){
+    n <- length(prev)
+    
+    num <- ( (sum((val - prev)^2))/n )^0.5
+    den1 <- ( sum(val^2)/n )^0.5
+    den2 <- ( sum(prev^2)/n )^0.5
+    
+    return(num/(den1+den2))
+}
+
+U2 <- function(prev, val){
+    n <- length(prev)
+    
+    n1 <- (prev[2:n]-val[2:n])/val[1:(n-1)]
+    num <- (sum(n1^2))^0.5
+    
+    n2 <- (val[2:n]-val[1:(n-1)])/val[1:(n-1)]
+    den <- (sum(n2^2))^0.5
+    
+    return(num/den)
+}
+
+evidenzia_minimi <- function(df) {
+  df_formattato <- df
+  
+  for(col in names(df)) {
+    if (col %in% c("p", "q", "P", "Q")){next}
+    else if(is.numeric(df[[col]])) {
+      min_val <- min(df[[col]], na.rm = TRUE)
+      df_formattato[[col]] <- ifelse(
+        df[[col]] == min_val,
+        cell_spec(df[[col]], bold = TRUE, color = "red", format = "latex"),
+        as.character(df[[col]])
+      )
+    }
+  }
+  return(df_formattato)
+}
+```
+
+```{r warning=FALSE, include=FALSE}
+# Importazione librerie utili per l'analisi
+library(tidyverse)
+library(fpp3)
+library(tseries)
+library(zoo)
+library(forecast)
+library(patchwork)
+library(ggtime)
+library(Metrics)
+library(kableExtra)
+```
+
+\newpage
+
+# Introduzione
+
+El Niño è un fenomeno climatico periodico caratterizzato da un anomalo riscaldamento delle acque superficiali nell’Oceano Pacifico tropicale centrale e orientale. Questo processo è strettamente connesso alle variazioni nella circolazione atmosferica e nei regimi dei venti. Durante gli eventi di El Niño, gli alisei orientali si indeboliscono o addirittura si invertono, permettendo alle masse d’acqua calda di spostarsi verso est, in direzione delle Americhe. Tale spostamento riduce l’affioramento di acque fredde e ricche di nutrienti, modificando così le correnti oceaniche e gli ecosistemi marini.
+
+La ridistribuzione del calore oceanico influenza la circolazione atmosferica globale, alterando la posizione e l’intensità delle correnti a getto e generando significative anomalie meteorologiche a scala planetaria. Le regioni lungo le coste occidentali delle Americhe sperimentano spesso un aumento delle precipitazioni e fenomeni di inondazione, mentre altre aree, come il bacino amazzonico e il nord-est degli Stati Uniti, possono essere soggette a lunghi periodi di siccità. Per l’ampiezza dei suoi effetti, El Niño è considerato uno dei fenomeni meteorologici più influenti al mondo ed è costantemente monitorato da agenzie internazionali come la NASA e la NOAA (NASA, 2025).
+
+In questo progetto, l’analisi si concentra sulla serie storica delle anomalie di El Niño, con l’obiettivo di individuare pattern, tendenze e comportamenti ciclici attraverso modelli statistici. La comprensione di tali dinamiche contribuisce al miglioramento delle capacità previsionali e alla valutazione dell’evoluzione climatica di lungo periodo di questo fenomeno (dati tratti da Our World in Data, 2024).
+
+Quando parliamo di anomalie in climatologia si sta parlando della differenza tra la temperatura osservata in un certo periodo e una media di riferimento (baseline) calcolata sullo stesso periodo del calendario. 
+
+\[
+\text{Anomalia}_{m,t} = X_{m,t} - \bar{X}_{m,\text{baseline}}
+\]
+
+In questo caso le anomalie di temperatura sono definite come la differenza tra la temperatura media mensile della superficie terrestre e oceanica e la media climatica dello stesso mese nel periodo di riferimento 1991–2020, e sono espresse in gradi Celsius.
+
+\newpage 
+
+# Analisi descrittiva
+
+La frequenza con cui sono state raccolte le rilevazioni è **mensile**. 
+Il periodo di rilevazione delle osservazioni è il seguente: (Aprile 1940 - Settembre 2024)
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+dati.Nino <- read.table(file=url("https://francesco2003gg.github.io/datasets/Nino.dat"), 
+                   header = TRUE)
+#dati.Nino <- read_csv("Nino.csv", skip = 1,
+#                      col_names = c("Mese", "In1", "Anno", "Temperatura", "In2"))
+
+MeseAnno <- function(x){
+    mesi <- c("January", "February", "March", "April", "May", "June",
+              "July", "August", "September", "October", "November", "December")
+    return(match(x, mesi))
+}
+
+dati.Nino.ts <- dati.Nino |>
+    select(-In1, -In2) |>
+    mutate(Mese = MeseAnno(Mese)) |>
+    mutate(mese = make_yearmonth(year = Anno, month = Mese)) |> select(-Anno) |>
+    as_tsibble(index = mese)
+
+# Plot Time Series
+dati.Nino.ts |> autoplot(Temperatura) +
+    labs(title = "Anomalie mensili della temperatura globale (°C)",
+         subtitle = "Calcolate rispetto alla media 1991–2020",
+         x = "Mese", y = "Temperatura") + theme_minimal() 
+```
+
+Notiamo un trend costante fino al 1980. Poi invece un trend lineare crescente dal 1980 in poi.
+Ai fini della nostra analisi ci concentreremo nel periodo che va dal 1980 in poi. 
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+nino.1980 <- dati.Nino.ts %>%
+  filter(year(mese) >= 1980)
+
+## Per poter utilizzare i metodi relativi alle serie storiche convine lavorare
+## con oggetti timeseries. 
+start_year <- 1980
+freq <- 12  # frequenza mensile
+nino.ts <- ts(nino.1980$Temperatura,
+                      start = c(start_year, 1),
+                      frequency = freq)
+
+nino.1980 %>% autoplot(Temperatura) + labs(title = "Anomalie temperature di 'El nino' dal 1980.")
+```
+
+Nel periodo preso in esame si evince la presenza di un trend crescente. 
+Per quanto riguarda la componente stagionale, non si osserva un pattern regolare o chiaramente identificabile.
+Ricordiamo che stiamo registrando delle anomalie e il nostro intervallo di riferimento va dal 1991 al 2020 e notiamo come siano presenti temperature più fredde rispetto al periodo di riferimento  nella parte iniziale della serie.  
+
+Facciamo un ulteriore grafico per visualizzare più nel dettaglio la componente stagionale. 
+Quindi raffiguriamo le medie dei valori mensili nel tempo per ogni anno. 
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+nino.1980 %>% gg_subseries(Temperatura) + ggtitle('Subseries plot temperature El Nino')
+```
+
+Concludiamo che non sembra esserci una componente stagionale. Tuttavia si può notare anche da questo grafico un ulteriore conferma della presenza di un trend crescente.
+
+L'assenza di stagionalità è una caratteristica tipica delle serie delle anomalie. In quanto la stagionalità presente nelle serie delle temperature assolute tende a svanire una volta applicata la trasformazione delle anomalie. 
+
+\newpage
+
+# Analisi delle componenti
+
+L'obiettivo di questa sezione è quello di individuare la migliore tecnica di decomposizione in grado di scomporre tale fenomeno complesso nelle sue componenti fondamentali (trend, stagionalità, residua), in modo da poterle osservare e studiare separatamente. 
+
+Proveremo qui di seguito diversi approcci e sceglieremo il metodo di decomposizione che meglio isola le componenti dal rumore casuale. La scelta del metodo più adeguato sarà guidata dall’analisi dei residui stimati, valutandone le proprietà statistiche e la loro approssimazione a un processo white noise.
+
+## Decomposizione classica additiva
+
+Proviamo una decomposizione classica additiva.
+
+\[
+X_t = T_t + S_t + R_t
+\]
+
+dove $X_t$ è il valore osservato al tempo $t$, $T_t$ rappresenta il trend, $S_t$ la componente stagionale e $R_t$ la componente residua.
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+nino.1980 %>% model(
+  classical_decomposition(Temperatura, type = 'additive')
+) %>% components() %>% autoplot() + labs(title = 'Decomposizione classica additiva delle anomalie di temperatura')
+```
+
+Controlliamo i residui del metodo di decomposizione effettuato per vedere se siamo stati in grado di cogliere le componenti della serie storica e che quindi non sia rimasta una qualche struttura nei residui. 
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+nino.decomposed <- decompose(nino.ts, type = 'additive')
+checkresiduals(nino.decomposed$random)
+```
+
+L’analisi dei residui mostra una media approssimativamente nulla e una varianza stabile, ma il pattern sinusoidale nell’ACF suggerisce che la decomposizione adottata non riesce a isolare completamente le componenti cicliche della serie. 
+
+Inoltre dal p-value del test di Ljung-Box rifiutiamo l'ipotesi nulla, cioè di assenza di autocorrelazione nei residui.  
+
+## Decomposizione moltiplicativa
+
+Ora proviamo una decomposizione moltiplicativa:
+
+\[
+X_t = T_t * S_t * R_t
+\]
+
+dove $X_t$ è il valore osservato al tempo $t$, $T_t$ rappresenta il trend, $S_t$ la componente stagionale e $R_t$ la componente residua.
+
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+nino.1980 %>% model(
+  classical_decomposition(Temperatura, type = 'multiplicative')
+) %>% components() %>% autoplot() + labs(title = 'Decomposizione classica moltiplicativa delle anomalie di temperatura')
+```
+
+Come fatto in precedenza, controlliamo i residui della decomposizione classica moltiplicativa.
+
+```{r, message=FALSE, echo=FALSE, warning=FALSE}
+nino.decomposed <- decompose(nino.ts, type = 'multiplicative')
+checkresiduals(nino.decomposed$random)
+```
+
+Anche in questo caso notiamo dai residui come il metodo di decomposizione non sia riuscito a catturare le componenti sistematiche della serie storica. Inoltre nonostante una media approssimativamente nulla si possono osservare valori estremi dei residui.
+
+Inoltre, anche in questo caso, dal p value del test di Ljung-Box rifiutiamo l'ipotesi nulla, cioè di assenza di autocorrelazione nei residui.   
+
+\newpage
+
+## Decomposizione STL
+
+Utilizziamo una decomposizione STL, più flessibile rispetto alle precedenti, utilizza metodi non parametrici per stimare le relazioni non lineari.
+
+```{r, echo=FALSE}
+fit <- stl(nino.ts, s.window = 'periodic', t.window = 9, robust = TRUE)
+plot(fit)
+```
+
+La serie è stata scomposta mediante STL (Seasonal–Trend decomposition using LOESS) impostando `s.window = periodic` e `t.window = 9`. Con questi parametri la componente stagionale risulta relativamente poco lisciata e il trend stimato è piuttosto locale.
+
+Procediamo ad un controllo della componente residua. 
+
+```{r, echo=FALSE}
+remainder <- fit$time.series[, "remainder"]
+res <- checkresiduals(remainder)
+```
+
+L’analisi della componente residua mostra valori medi prossimi a zero e una variabilità relativamente costante, senza picchi estremi come osservato nelle decomposizioni precedenti.
+Inoltre dall'ACF dei reisdui si può notare un'assenza di autocorrelazione, come individuato anche dal **test di Ljung-Box**, con un **p-value** di `r round(res$p.value, 2)`, indicando che trend e stagionalità sono stati efficacemente rimossi.
+Inoltre sembrano essere normalmente distribuiti.
+
+Nel complesso quindi,  la combinazione `s.window = "periodic"` e `t.window = 9` appare adeguata per descrivere la struttura deterministica della serie.
+
+\newpage
+
+# Verifica della Stazionarietà
+
+L'assunzione che la nostra serie storica sia una realizzazione di un processo stazionario è fondamentale ai fini della nostra analisi.  
+Sicuramente la nostra serie storica presenta un trend crescente nel periodo di riferimento, quindi è non stazionaria in media. 
+
+Verifichiamo se anche la varianza varia nel tempo oppure è costante. 
+
+## Stazionarietà in varianza
+
+Per fare ciò utilizziamo uno **standard deviation mean** plot sulla serie originale, quindi un metodo grafico.  
+
+```{r echo=FALSE}
+
+serie_diff <- nino.1980$Temperatura
+medie_diff <- rep(0,12)
+sd_diff <- rep(0,12)
+n_blocchi <- 12
+n_per_blocco <- floor(length(serie_diff) / n_blocchi)
+
+medie_diff <- rep(0, n_blocchi)
+sd_diff <- rep(0, n_blocchi)
+
+k <- 1
+for (i in 1:n_blocchi) {
+  inizio <- k
+  fine <- min(k + n_per_blocco - 1, length(serie_diff))
+  blocco <- serie_diff[inizio:fine]
+  
+  medie_diff[i] <- mean(blocco, na.rm = TRUE)
+  sd_diff[i] <- sd(blocco, na.rm = TRUE)
+  
+  k <- fine + 1
+}
+
+plot(medie_diff, sd_diff,ylim = c(-2, 2), pch = 16,
+     ylab = 'Standard Deviation',
+     xlab = 'Mean',
+     main = 'Standard Deviation - Mean')
+```
+
+Da questo grafico si può dedurre che la serie storica ha una varianza pressocchè costante nel tempo. Quindi non utilizziamo nessuna trasformazione per i nostri dati. 
+
+## Stazionarietà in media
+
+Verifichiamo adesso la stazionarietà in media, utilizzando prima il grafico delle autocorrelazioni globali sulla serie storica originale.
+
+```{r echo=FALSE}
+ggAcf(nino.1980$Temperatura) + ggtitle('ACF Serie storica originale')
+```
+
+Come si può notare dal grafico delle autocorrelazioni, è presente un trend crescente in quanto le autocorrelazioni decadono a 0 piuttosto lentamente. 
+
+Per rendere questa serie stazionaria, iniziamo procedendo con una differenziazione prima. 
+
+$$
+Y_t = \nabla X_t 
+$$
+
+Vediamo adesso come cambia il grafico delle autocorrelazioni globali della serie delle differenze prime. 
+
+```{r echo=FALSE}
+serie_diff <- diff(nino.1980$Temperatura)
+ggAcf(serie_diff) + ggtitle("Serie delle differenze prime")
+```
+
+Dal grafico si evince che le autocorrelazioni globali sono tutte uguali a 0 tranne quella a lag 1.
+
+Verifichiamo la stazionarietà anche con il Dickey-Fuller Test:
+
+$$
+\begin{aligned}
+H_0 &: \gamma = 0 \quad \text{(presenza di radice unitaria)} \\
+H_1 &: \gamma < 0 \quad \text{(stazionarietà)}
+\end{aligned}
+$$
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+adf.test(serie_diff) # K = 0 unit root test
+```
+
+Dal test emerge che rifiutiamo l'ipotesi nulla, cioè quella di **non stazionarietà**.
+
+La trasformazione scelta per i nostri dati quindi è la seguente:
+
+$$
+Y_t = \nabla X_t
+$$
+
+\newpage
+
+# Identificazione del modello
+
+## Obiettivo
+
+L'obiettivo adesso è quello di identificare un modello stocastico che può descrivere al meglio il processo generatore che si cela dietro la serie $Y_t$. 
+L’identificazione del modello avviene attraverso l’analisi congiunta della funzione di autocorrelazione (ACF) e della funzione di autocorrelazione parziale (PACF) di $Y_t$. L’andamento e il troncamento di tali funzioni forniscono indicazioni sui possibili ordini p, q, P e Q del modello.
+
+```{r echo=FALSE}
+acf_1 <- ggAcf(serie_diff) + ggtitle("ACF della serie delle differenze prime")
+acf_2 <- ggPacf(serie_diff) + ggtitle("PACF della serie delle differenze prime")
+acf_1 + acf_2
+```
+
+Dai due grafici si può notare un punto di troncamento al lag 1 nelle autocorrelazioni globali. Ma per quanto riguarda le parziali sembra esserci un punto di troncamento al lag 3.
+
+Siccome non emergono dai grafici precedenti picchi significativi ai lag stagionali (12,24,...), l'introduzione dei termini stagionali (P, Q) non risulta essere giustificata. 
+L'assenza di tali termini era prevedibile, in quanto stiamo lavorando con una serie delle anomalie che non presenta la stagionalità deterministica di una serie delle temperature assolute. 
+
+Date le precedenti premesse bisogna quindi confrontare diversi modelli.
+
+\newpage
+
+## MA(1)
+
+Supponendo di aver individuato un punto di troncamento nelle autocorrelaizoni globali e un decadimento esponenziale nelle autocorrelazioni parziali, questo comportamento è tipico di una serie generata da un modello media mobile di ordine 1: $MA(1)$.
+
+```{r echo=FALSE}
+serie_diff <- diff(nino.1980$Temperatura)
+
+# 2. Creo nuovo dataframe eliminando la prima riga
+nino.1980.d <- nino.1980[-1, ]
+
+# 3. Sostituisco la colonna Temperatura con la serie differenziata
+nino.1980.d$Temperatura <- serie_diff
+
+fit_ma1 <- nino.1980.d %>% 
+  model(ARIMA(Temperatura~pdq(0,0,1) + PDQ(0,0,0)))
+
+report(fit_ma1)
+gg_tsresiduals(fit_ma1)
+
+params <- tidy(fit_ma1)
+knitr::kable(params[2:6])
+```
+
+La stima del coefficiente risulta essere statisticamente significativa al 5%.
+In questo caso, l’analisi dei residui del modello stimato suggerisce che essi possano essere approssimati a un processo white noise gaussiano, caratterizzato da media nulla, varianza costante e assenza di autocorrelazione significativa. 
+
+## AR(3)
+
+Supponendo di aver individuato un decadimento esponenziale nelle autocorrelazioni globali e un punto di troncamento nelle autocorrelazioni parziali al lag 3, possiamo dedurre che questo comportamento è tipico di una serie generata da un modello autoregressivo di ordine 3 $AR(3)$. 
+ 
+```{r echo=FALSE}
+fit_ar3 <- nino.1980.d %>% 
+  model(ARIMA(Temperatura~pdq(3,0,0) + PDQ(0,0,0)))
+
+report(fit_ar3)
+ggtime::gg_tsresiduals(fit_ar3)
+
+params <- tidy(fit_ar3)
+
+knitr::kable(params[2:6])
+```
+
+Tutti i parametri sono statisticamente significativi al 5%.
+Anche in questo caso, l’analisi dei residui del modello stimato suggerisce che essi possano essere approssimati a un processo white noise gaussiano, caratterizzato da media nulla, varianza costante e assenza di autocorrelazione significativa. 
+
+## ARMA(2,1)
+
+Considerando una serie di modelli, con diversi valori di p e q, otteniamo la seguente tabella riassuntiva.
+
+```{r echo=FALSE, warning=FALSE}
+risultati_arma <- prova_modelli_arma(nino.1980.d, "Temperatura", max_p = 3, max_q = 3)
+knitr::kable(head(risultati_arma))
+```
+
+Sulla base dei criteri di informazione, il modello ARIMA(2,1) risulta essere quello che fornisce la migliore approssimazione della dinamica della serie storica analizzata.
+
+$$
+Y_t \sim ARMA(2,1)
+$$
+
+```{r, echo=FALSE}
+fit_arma21 <- nino.1980.d %>% 
+  model(ARIMA(Temperatura~0+ pdq(2,0,1) + PDQ(0,0,0)))
+
+report(fit_arma21)
+
+params <- tidy(fit_arma21)
+
+knitr::kable(params[2:6])
+```
+
+Tutti i coefficienti hanno p-value $\approx 0$, quindi risultano statisticamente significativi.
+Ciò significa che ogni componente del modello (AR1, AR2, MA1 e la costante) contribuisce in modo statisticamente rilevante alla spiegazione della serie.
+
+
+I coefficienti AR positivi indicano una dipendenza temporale diretta tra i valori della serie, mentre il coefficiente MA, prossimo a -1, suggerisce una forte correzione degli errori passati. Gli shock (errori casuali) influenzano direttamente il valore della serie al tempo successivo, con un’intensità molto alta (quasi -1).
+
+\newpage
+
+### Analisi dei residui sul seguente modello
+
+L’analisi dei residui è fondamentale per valutare l’adeguatezza del modello e quindi se il modello individuato riesce a cogliere la struttura stocastica della serie temporale.
+
+Facciamo l'analisi dei residui per verificare che gli errori del processo siano distruibuiti come un white noise, con media 0, varianza costante, preferibilmente con andamento normale. 
+
+$$
+\epsilon \sim WN(0, \sigma^2)
+$$
+
+Come primo passo verifichiamo se ci sono dei problemi nel modello identificato vedendo il grafico dei residui standardizzati e dei residui standardizzati elevati al quadrato.
+
+Residui standardizzati:
+
+$$
+r_t = \frac{\hat{\varepsilon}_t - \overline{\hat{\varepsilon}}}{\hat{\sigma}}
+$$
+
+
+```{r echo=FALSE, warning=FALSE}
+res_arma <- residuals(fit_arma21)
+res_arma$.resid <- scale(res_arma$.resid)
+ggplot(res_arma, aes(x = mese, y = .resid)) +
+  geom_line(size=0.65) +
+  labs(
+    x = "Data",
+    y = "Residui",
+    title = "Residui del modello ARMA(2,1) nel tempo"
+  ) +
+  geom_hline(yintercept = c(-2, 2), color = "red", linetype = "dashed", size = 0.8)+
+  theme_minimal()
+
+ggplot(res_arma, aes(x = mese, y = .resid^2)) +
+  geom_line(size = 0.65) +
+  labs(
+    x = "Data",
+    y = "Residui",
+    title = "Residui al quadrato del modello ARMA(2,1) nel tempo"
+  ) +
+  theme_minimal()
+```
+
+```{r, echo=FALSE}
+n_res <- sum(res_arma$.resid <= 2 & res_arma$.resid >= -2)
+n_tot <- length(res_arma$.resid)
+val <- n_res / n_tot
+```
+
+L’analisi della serie temporale dei residui standardizzati mostra che non sono presenti trend evidenti, né variazioni sistematiche della varianza nel tempo. Inoltre, circa il `r round(val,3)`% dei residui risulta compreso nell’intervallo tra [–2; +2], come atteso sotto l’ipotesi di normalità con media zero e varianza unitaria. Questo suggerisce che, nel complesso, il modello ARMA produce residui compatibili con quelli di un processo white noise. 
+
+Il grafico dei residui standardizzati al quadrato evidenzia la presenza di **cluster**, ovvero periodi in cui valori elevati dei residui al quadrato tendono a concentrarsi nel tempo, alternandosi a periodi di bassa variabilità. Tale comportamento può indicare autocorrelazione nella varianza condizionata, suggerendo possibili problemi di eteroschedasticità o una specificazione incompleta del modello. Questo risultato può indicare, quindi, che il modello ARMA stimato non cattura appieno la variabilità delle osservazioni.
+
+```{r, echo=FALSE}
+res_arma21 <- residuals(fit_arma21)
+checkresiduals(res_arma21$.resid)
+```
+
+Dal test di Ljung-Box concludiamo che i residui del processo non sono correlati dato che non rifiutiamo l'ipotesi nulla $H_0$, inoltre sembra esserci una variabilità costante nel periodo di riferimento.
+Osservando inoltre la distribuzione dei residui sembrano seguire un andamento normale.  
+
+Verifichiamo anche le autocorrelazioni parziali:
+
+```{r, echo=FALSE}
+ggPacf(res_arma21$.resid) + ggtitle('Autocorrelazioni parziali residui')
+```
+
+E il test di Dickey-Fuller:
+
+```{r, echo=FALSE, warning=FALSE}
+result <- adf.test(res_arma21$.resid)
+knitr::kable(data.frame(`Statistica Test` = result$statistic,
+           "p_value" = result$p.value,
+           "lag" = result$parameter))
+```
+Concludiamo che i residui sono stazionari, hanno una media prossima a 0 e una varianza costante. 
+
+\newpage
+
+Confrontiamo la distribuzione dei residui con i quantili teorici di una Normale, attraverso il **qq-plot**. 
+
+```{r, echo=FALSE}
+qqnorm(res_arma21$.resid)
+qqline(res_arma21$.resid)
+```
+
+E dal test di Jarque-Bera:
+
+$$
+H_0 : \frac{\mu_3}{\sigma_3}=0 \quad H_1= \frac{\mu_4}{\sigma_4} - 3=0
+$$
+
+```{r, echo=FALSE}
+jarque.bera.test(res_arma21$.resid)
+```
+
+Non rifiutiamo $H_0$, quindi ipotesi di normalità.
+
+In questo caso, la diagnostica dei residui mostra che gli errori si comportano approssimativamente come un **white noise** che si distribuisce normalmente, senza evidenti autocorrelazioni o pattern sistematici. Ciò conferma che il modello rappresenta in modo abbastanza efficace la struttura della serie temporale. 
+
+\newpage
+
+# Forecasting
+
+## Obiettivo
+
+Data la natura climatica della serie storica, l’obiettivo dell’analisi previsiva è stimare l’andamento futuro delle anomalie di temperatura su un orizzonte di previsione pari a dodici mesi. A tal fine, verranno inizialmente considerati modelli di previsione semplici, adottati come benchmark, al fine di confrontarne le prestazioni con quelle di modelli più complessi. 
+
+## Metodi benchmark 
+
+Dopo aver suddiviso la nostra serie storica in un set di dati di training e uno di test, iniziamo la nostra analisi. Consideriamo come test set le ultime **12 osservazioni**, corrispondenti a un anno.
+
+I metodi benchmark che utilizziamo sono: 
+
+* Naive: Tutte le previsioni sono uguali all'ultimo valore della serie storica;
+* Seasonal Naive: metodo analogo al precedente, in cui ciascuna previsione è uguale al valore osservato nello stesso periodo della stagionalità precedente;
+* Drift Method: un'estenzione del metodo naive che consente alle previsioni di crescere/decrescere incorporando un termine di (**drift**) che cattura l'andamento della serie. 
+
+```{r echo=FALSE, warning=FALSE}
+n <- length(nino.ts)
+n_train <- n-12
+
+train <- head(nino.ts, n_train)
+test  <- tail(nino.ts, n-n_train)
+
+fit_naive <- naive(train, h=12)
+fit_snaive <- snaive(train, h=12)
+fit_rwf <- rwf(train, h=12, drift = TRUE)
+
+
+err_prev_naive <- test-fit_naive$mean
+err_prev_snaive <- test-fit_snaive$mean
+err_prev_rwf <- test-fit_rwf$mean
+
+autoplot(tail(nino.ts, 0.25*n)) + 
+  autolayer(fit_naive$mean, series = 'Naive') +
+  autolayer(fit_snaive$mean, series = 'Seasonal Naive') +
+  autolayer(fit_rwf$mean, series = 'Metodo con il drift') +
+  labs(y = 'Temperatura',
+       title = 'Forecast con metodi benchmark',
+       colour = 'Metodo') +
+   theme(
+    legend.position = c(1, 0.00),      # basso a destra
+    legend.justification = c("right", "bottom"),
+    legend.background = element_rect(
+      fill = "white",
+      colour = "black"
+    )
+  )
+```
+
+Come si osserva dal grafico, che mette in evidenza gli ultimi anni della serie, i metodi di previsione benchmark non sembrano in grado di catturare adeguatamente l’andamento della serie storica. In particolare, il metodo seasonal, pur mostrando una scarsa accuratezza complessiva, riesce a cogliere il trend decrescente osservato nell’ultima parte del periodo analizzato.
+
+```{r, echo=FALSE}
+mae_naive <- MAE(err_prev_naive)
+rmse_naive <- RMSE(err_prev_naive)
+mape_naive <- mape(fit_naive$mean, test)
+u1_naive <- U1(fit_naive$mean, test)
+u2_naive <- U2(fit_naive$mean, test)
+
+mae_snaive <- MAE(err_prev_snaive)
+rmse_snaive <- RMSE(err_prev_snaive)
+mape_snaive <- mape(fit_snaive$mean, test)
+u1_snaive <- U1(fit_snaive$mean, test)
+u2_snaive <- U2(fit_snaive$mean, test)
+
+
+mae_rwf <- MAE(err_prev_rwf)
+rmse_rwf <- RMSE(err_prev_rwf)
+mape_rwf <- mape(fit_rwf$mean, test)
+u1_rwf <- U1(fit_rwf$mean, test)
+u2_rwf <- U2(fit_rwf$mean, test)
+```
+
+\newpage
+
+## Modello ARIMA(2,1,1)
+
+Siccome il modello che meglio si adattava alla serie in precedenza era un'ARIMA(2,1,1), proviamo questo modello anche per fini previsivi.
+
+```{r, echo=FALSE}
+arima_21 <- arima(train, order = c(2,1,1))
+fit_arima_21 <- forecast(arima_21, h = 12, level = c(80, 95))
+
+autoplot(tail(nino.ts, 0.25*n),) + 
+  autolayer(fit_arima_21, alpha = 0.25) + 
+  labs(y = 'Temperatura', title = 'Forecast con ARIMA(2,1,1)')
+```
+
+Nel complesso, il modello ARIMA(2,1,1) riesce a catturare l’andamento decrescente osservato nell’ultima parte della serie in modo sensibilmente migliore rispetto ai metodi benchmark precedentemente considerati. Tuttavia, per costruzione, il modello ARIMA produce previsioni caratterizzate da un’evoluzione lineare, che non riesce a rappresentare pienamente la complessità dell’andamento reale della serie storica.
+
+```{r, echo=FALSE}
+err_prev_arima <- test - fit_arima_21$mean
+
+mae_arima <- MAE(err_prev_arima)
+rmse_arima <- RMSE(err_prev_arima)
+mape_arima <- mape(fit_arima_21$mean, test)
+u1_arima <- U1(fit_arima_21$mean, test)
+u2_arima <- U2(fit_arima_21$mean, test)
+```
+
+## Previsione con decomposizione STL
+
+```{r, echo=FALSE}
+fit_stl <- stlf(train, h = 12, s.window = "periodic", robust = TRUE, level = c(80, 95))
+
+autoplot(tail(nino.ts, 0.25*n)) +
+  autolayer(fit_stl, alpha = 0.25) +
+  labs(
+    y = "Temperatura",
+    title = "Forecast con STL",
+    subtitle = "Train e Test")
+```
+
+Infine, le previsioni ottenute mediante la decomposizione STL risultano le uniche tra i metodi considerati a non mostrare un andamento decrescente nell’ultimo periodo della serie. Tuttavia, questo approccio consente di modellare in modo più flessibile la struttura della serie, catturando dinamiche non lineari che non sono rappresentate dai modelli lineari come l’ARIMA. 
+
+## Risultati 
+
+```{r, echo=FALSE}
+err_prev_stl <- test - fit_stl$mean
+
+mae_stl <- MAE(err_prev_stl)
+rmse_stl <- RMSE(err_prev_stl)
+mape_stl <- mape(fit_stl$mean, test)
+u1_stl <- U1(fit_stl$mean, test)
+u2_stl <- U2(fit_stl$mean, test)
+
+
+c1 <- cbind(mae_naive, rmse_naive, mape_naive, u1_naive, u2_naive)
+c2 <- cbind(mae_snaive, rmse_naive, mape_snaive, u1_snaive, u2_snaive)
+c3 <- cbind(mae_rwf, rmse_rwf, mape_rwf, u1_rwf, u2_rwf)
+c4 <- cbind(mae_arima, rmse_arima, mape_arima, u1_arima, u2_arima)
+c5 <- cbind(mae_stl, rmse_stl, mape_stl, u1_stl, u2_stl)
+
+tab <- rbind(round(c1,2),
+             round(c2,2),
+             round(c3,2),
+             round(c4,2),
+             round(c5,2))
+
+colnames(tab) <- c('MAE', 'RMSE', 'MAPE', 'U1', 'U2')
+rownames(tab) <- c('Naive', 'Seasonal Naive', 'RWF', 'Arima(2,1,1)', 'Decomposizione STL') 
+
+tab |> 
+  as.data.frame() |>
+  evidenzia_minimi() |>
+  kable(escape = FALSE, format = "latex", booktabs = TRUE) |>
+  kable_styling(latex_options  = "hold_position")
+```
+
+Dalla tabella riepilogativa dei risultati emerge che il metodo previsivo più accurato è l'ARIMA(2,1,1). Tuttavia la decomposizione STL a nostro parere è maggiormente in grado di cogliere la dinamica reale della serie storica. 
+
+\newpage
+
+# Conclusioni 
+
+L’analisi della serie storica delle anomalie delle temperature ha permesso di identificare i pattern e le dinamiche principali del fenomeno, evidenziando un trend crescente nel lungo periodo e una stagionalità sostanzialmente assente a causa della natura stessa delle serie. La decomposizione STL si è dimostrata la più efficace nell’isolare le componenti di trend e stagionalità, riducendo i residui a un processo approssimativamente white noise.
+
+Il modello ARIMA(2,1,1) si è rivelato il più adeguato per descrivere la dinamica della serie e per effettuare previsioni a breve termine, riuscendo a cogliere in modo soddisfacente l’andamento decrescente dell’ultimo periodo. Tuttavia, la natura lineare del modello limita la capacità di catturare pienamente eventuali dinamiche non lineari. I metodi benchmark evidenziano i limiti dei modelli troppo semplici o non lineari nel riprodurre trend recenti. Invece le previsioni che si basano sulla decomposizione STL offrono una rappresentazione più flessibile e realistica della dinamica della serie storica.
+
+# Prospettive future
+
+Per sviluppi futuri sarebbe interessante adottare metodi previsivi più sofisticati che riescano a cogliere la struttura non lineare del fenomento. 
+Considerando l’osservazione di possibili fenomeni di clustering nei residui, si potrebbe valutare l’adozione di modelli che catturino dinamiche della varianza condizionata, come ARCH/GARCH, al fine di migliorare la rappresentazione della volatilità della serie. Infine, anche l’aggiunta di dati esogeni, ad esempio indici ENSO o altre variabili climatiche, potrebbe aumentare ulteriormente l’accuratezza delle previsioni e fornire una comprensione più completa del fenomeno.
+
+\newpage
+
+# Riferimenti 
+1. NASA (2025). *El Niño*. NASA Science: Earth – Explore El Niño. Disponibile su: https://science.nasa.gov/earth/explore/el-nino/ 
+2. Our World in Data (2024). *Global temperature anomalies by El Niño and La Niña and month* [dataset]. 
+   Dati elaborati a partire dal Copernicus Climate Change Service (C3S). 
+   Disponibile su: https://ourworldindata.org/grapher/global-temperature-anomalies-by-el-nino-la-nina
+
+
+

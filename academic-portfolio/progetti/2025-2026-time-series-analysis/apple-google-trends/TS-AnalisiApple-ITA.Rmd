@@ -1,0 +1,970 @@
+---
+title: "Progetto Serie Storica Univariata Apple"
+author: "Francesco P. | Gabriele S."
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: 3
+    number_sections: yes
+  html_document:
+    toc: yes
+    toc_depth: '3'
+    df_print: paged
+---
+
+
+<!-- Per far sì che la legenda sia da sola -->
+\newpage
+
+```{r Libraries, include=FALSE, warning=FALSE}
+# Librerie utili per il progetto in ordine di utilizzo
+## Librerie base
+library(tidyverse)
+
+# Dataframe specializzati per serie temporali, spesso usato con fable
+library(tsibble)
+
+# Utile per i seasonal plot
+library(ggtime)
+
+# Con questa possiamo fare modelli ARIMA, ETS e decomposizione
+library(forecast)
+
+# Utile per organizzare i grafici di ggplot
+library(patchwork)
+
+# Utile per test statistici per serie temporali (stazionarietà, unit root tests)
+library(tseries)
+
+# Utile per praticamente tutto, utilizzata la prima volta per la dec. additiva
+library(fpp3)
+
+# Serve ad evidenziare i minimi/massimi nelle tabelle in output pdf
+library(kableExtra)
+
+# Per usare stringhe combinate con Latex
+library(latex2exp)
+
+## Librerie avanzate
+# Sviluppato da Meta, ottimo per serie con stagionalità multiple e anomalie
+#library(prophet)
+
+# Evoluzione di fable, integrato con tidyverse
+#library(fable)
+
+# Utile per ACF e PACF
+#library(feasts)
+
+#library(knitr)
+
+#library(zoo)
+```
+
+
+```{r Import data, warning=FALSE, include=FALSE}
+dati <- read.table(file=url("https://francesco2003gg.github.io/datasets/AppleGT.dat"),header = TRUE)
+```
+
+```{r Modify data, warning=FALSE, include=FALSE}
+dati <- dati |>
+    mutate(Mese = yearmonth(Mese)) |>
+    as_tsibble(index = Mese)
+```
+
+# Introduzione
+
+Negli ultimi decenni Apple si è confermata essere uno dei grandi colossi 
+nell'ambito tech, si può quindi facilmente dire che abbia attirato l'attenzione 
+di tutto il mondo.
+
+A fronte di ciò si può immaginare che, a maggior ragione per un'industria del 
+genere, oggigiorno un buon indicatore della desiderabilità di qualcosa sia 
+proprio quanto quest'ultima viene cercata su Google, il motore di ricerca più 
+utilizzato al mondo.
+
+A tal proposito Google Trend è uno strumento infinitamente utile per verificare 
+l'interesse del pubblico verso qualcosa.
+Su questo sito si può verificare quanto una qualsiasi stringa di 
+caratteri sia stata cercata online per periodi diversi e con le frequenze che si 
+preferisce per poi ottenere una serie storica che indica proprio il numero di 
+ricerche per quella parola.
+La serie storica non mostra l'effettivo valore delle ricerche, ne mostra invece 
+una versione proporzionata al picco di ricerche, rappresentato come 100.
+Il che ovviamente ad indicare che il periodo con il maggior numero di ricerche 
+sarà rappresentato come 100 e gli altri periodi saranno scalati in base a quello, 
+ad esempio se in un altro periodo le ricerche saranno un quarto di quelle del 
+periodo massimo allora quest'ultimo verrà rappresentato con un 25.
+
+In questo particolare caso sarà oggetto di studio la [serie storica](http://trends.google.it/trends/explore?date=all&q=apple&hl=it) ricavata da 
+Google Trend per le ricerche riguardo la parola *"Apple"* nel periodo 
+**Gennaio 2004**-**Ottobre 2025** con una **frequenza mensile**[1].
+
+\newpage
+
+# Analisi della serie storica
+
+## Analisi di base
+
+Si cominci con un semplice plot della serie storica dove si indichi con un 
+punto l'osservazione dove si ha il valore massimo.
+
+
+```{r Autoplot, echo=FALSE, warning=FALSE, fig.width=8, fig.height=4}
+max_punto <- dati |>
+    filter(Interesse == max(Interesse))
+
+library(ggrepel)
+dati |> autoplot(Interesse) +
+    labs(title = "Ricerche Google per \'Apple\'  (2004-Gen 2025-Ott)", 
+         x = "Mese", y = "Ricerche") + theme_bw() +
+    geom_point(data = max_punto, aes(x = Mese, y = Interesse), 
+               color = "red", size = 1.5) +
+    geom_label_repel(data = max_punto,
+                     aes(x = Mese, y = Interesse,
+                         label = paste0(format(Mese, "%b %Y"))),
+                     color = "red",
+                     fontface = "bold",
+                     nudge_y = 10,
+                     box.padding = 1) +
+    theme_bw()
+```
+
+Dal grafico si riescono a notare alcune cose:
+
+- Sembra esserci un trend crescente;
+- Sembra essere presente una stagionalità che diventa maggiormente visibile a 
+partire dal 2011;
+- C'è un valore eccezionalmente alto a settembre 2019, questo probabilmente 
+dovuto ad un picco di ricerche in quel mese che in questo caso potrebbe essere 
+giustificato da qualche annuncio molto atteso dai clienti dell'azienda oggetto 
+dell'analisi.
+
+\newpage
+
+## Analisi della stagionalità
+
+Come detto sembra essere presente una stagionalità nei dati, 
+lo si verifichi tramite dei plot.
+
+```{r Seasonality, echo=FALSE, warning=FALSE, fig.width=6, fig.height=3}
+dati |> gg_season(Interesse) +
+    labs(title = "Plot stagionale",
+         x = "Mese", y = "Ricerche") + theme_bw()
+```
+
+Tramite il plot stagionale si può confermare quanto supposto in precedenza su 
+un'ipotetica presenza di stagionalità con dei picchi a settembre.
+
+Tuttavia per essere sicuri si utilizzino anche altri grafici che possono risultare 
+molto utili per verificare la stagionalità.
+
+```{r Seasonality 2, echo=FALSE, warning=FALSE, fig.width=6, fig.height=3}
+# Plot con medie mensili
+G1 <- dati |>
+    ggtime::gg_subseries(Interesse, period = "year") +
+    labs(title = "Media mensile",
+         x = "Mese", y = "Ricerche") +
+    theme_bw() + theme(axis.text.x = element_blank())
+
+
+# Polar seasonal plot
+G2 <- dati |>
+    mutate(
+        Anno = factor(year(Mese)),
+        Mese_num = month(Mese),
+        Mese_nome = month(Mese, label = TRUE)
+    ) |>
+    ggplot(aes(x = Mese_num, y = Interesse, 
+               group = Anno, color = Anno)) +
+    geom_line() +
+    coord_polar() +
+    scale_x_continuous(breaks = 1:12, 
+                       labels = month.abb) +
+    labs(title = "Polar Seasonal Plot",
+         x = "", y = "Ricerche",
+         color = "Year") +
+    theme_bw() + theme(legend.position = "none")
+
+G1
+
+G2
+```
+
+Grazie a questi 2 grafici si può confermare la presenza di una stagionalità 
+che porta a dei picchi a Settembre e nei mesi antecedenti o precedenti in ogni 
+anno.
+
+Il motivo di questa stagionalità si scopre in realtà essere che nel mese di 
+settembre ogni anno l'Apple tiene degli eventi in cui vengono presentati tutti 
+i nuovi prodotti in uscita e in produzione, quindi chiaramente in quei mesi 
+l'affluenza online per informarsi su tutte le novità porta a dei picchi annuali.
+
+Nello specifico a settembre 2019 c'é stato il lancio dell'iPhone 11, il primo al 
+mondo ad avere 3 telecamere e l'Apple Watch Series 5, che insieme a tanti altri 
+prodotti hanno portato l'interesse globale verso il brand alle stelle.
+
+\newpage
+
+## Analisi dell'autocorrelazione
+
+```{r ACF e PACF, echo=FALSE, warning=FALSE, fig.width=8, fig.height=6}
+G3 <- dati |> ggAcf(lag.max = 36) +
+    labs(title = "Autocorrelation function",
+         x = "Lag (months)",
+         y = "Autocorrelation") +
+    theme_bw()
+
+G4 <- dati |> ggPacf(lag.max = 36) +
+    labs(title = "Partial-Autocorrelation function",
+         x = "Lag (months)",
+         y = "Partial-Autocorrelation") +
+    theme_bw()
+
+G3 / G4
+```
+
+Analizzando i grafici si nota che quello di autocorrelazione globale è 
+fortemente influenzato dalla stagionalità, con infatti le autocorrelazioni che 
+decrescono a 0 molto lentamente in modo sinusoidale, tuttavia sembra proprio essere presente una correlazione ai lag 
+da 1 a 5 e a lag 12, tuttavia queste supposizioni potrebbero essere influenzate 
+dalla stagionalità, sarà  infatti utile guardare il grafico dopo aver effettuato 
+una decomposizione della serie storica.
+
+Invece per quanto riguarda il grafico di autocorrelazione parziale si nota una 
+correlazione a lag 1 e 2 e probabilmente anche a lag 12, invece tutte le altre 
+sono approssimabili a 0 dato che nonostante le bande di confidenza siano 
+parallele teoricamente non dovrebbero essere così, dovrebbero infatti allargarsi 
+all'aumentare del lag.
+
+\newpage
+
+# Decomposizione
+
+Si passi ora alla fase di decomposizione della serie storica per individuare 
+un modello che possa descrivere bene la composizione dei dati in esame.
+
+## Decomposizione additiva
+
+Si parta con una decomposizione additiva che mira ad individuare una componente 
+del trend, una della stagionalità e una componente resiuda (remainder) frutto del caso.
+
+$$y_t = S_t + T_t + R_t$$
+
+```{r Decomposizione additiva, echo=FALSE, warning=FALSE, fig.width=8, fig.height=3}
+title.tmp <- "Decomposizione classica additiva delle ricerche su 'Apple'"
+dati |> model(
+  classical_decomposition(Interesse, type = 'additive')
+) |> components() |> autoplot() + labs(title = title.tmp) + theme_bw()
+```
+
+Una decomposizione additiva sembra in questo caso essere una buona soluzione per 
+decomporre questa serie storica, tuttavia per giudicarlo al meglio controlliamo 
+i residui e si paragonino poi questa decomposizione a quella moltiplicativa.
+
+\newpage
+```{r Residui decomposizione additiva, echo=FALSE, warning=FALSE, fig.width=8, fig.height=3}
+start_year <- 2004
+freq <- 12  # frequenza mensile
+dati.ts <- ts(dati$Interesse,
+                      start = c(start_year, 1),
+                      frequency = freq)
+dati.decomposed.add <- decompose(dati.ts, type = 'additive')
+checkresiduals(dati.decomposed.add$random)
+```
+
+Dall'analisi dei residui si nota che sembra ancora essere presenta 
+un'autocorrelazione nei residui, nello specifico a lag 4 e 5, il che indica che 
+questa struttura probabilmente non riesce a decomporre bene la serie storica e a isolare le componenti deterministiche della serie.
+
+## Decomposizione moltiplicativa
+
+Si provi invece ora la decomposizione moltiplicativa per verificare le sue 
+performance in confronto a quelle della decomposizione additiva.
+
+Con la decomposizione moltiplicativa si cerca di decomporre la serie storica 
+come prodotto di trend, stagionalità e residui.
+
+$$y_t = S_t * T_t * R_t$$
+
+```{r Decomposizione moltiplicativa, echo=FALSE, warning=FALSE, fig.width=8, fig.height=3}
+title.tmp <- "Decomposizione classica moltiplicativa delle ricerche su 'Apple'"
+dati |> model(
+  classical_decomposition(Interesse, type = 'multiplicative')
+) |> components() |> autoplot() + labs(title = title.tmp) + theme_bw()
+```
+
+Come in precedenza si controllino i residui per verificare i risultati ottenuti 
+dalla decomposzione moltiplicativa.
+
+```{r Residui decomposizione moltiplicativa, echo=FALSE, warning=FALSE, fig.width=8, fig.height=3}
+dati.decomposed.mult <- decompose(dati.ts, type = 'multiplicative')
+checkresiduals(dati.decomposed.mult$random)
+```
+
+Come in precedenza anche in questo caso sembra ancora essere presente 
+autocorrelazione fra i residui della struttura di decomposizione, quindi anche 
+questa non sembra una buona decomposizone per la serie storica oggetto di studio.
+
+
+## Decomposizione additiva usando LOESS
+
+Si provi quindi un altro tipo di decomposizione, nello specifico una 
+decomposizone additiva che usi LOESS (locally estimated scatterplot smoothing).
+
+Utilizzando questo metodo si riesce a decomporre la serie storica con un metodo 
+non parametrico per cui si guarda ad una decomposizione locale, dando meno peso 
+agli outlier, che sono presenti in questo caso, e essendo flessibile anche a 
+cambi di stagionalità.
+
+```{r Decomposizione STL, echo=FALSE, warning=FALSE, fig.width=8, fig.height=3}
+dati.decomposed.stl <- dati.ts |>
+  stl(s.window="periodic", robust=TRUE)
+dati.decomposed.stl |> autoplot()
+```
+
+Dal grafico sembra che si sia ottenuta una decomposizione con una componente 
+stagionale più presente, si analizzino i residui.
+
+```{r Residui decomposizione STL, echo=FALSE, warning=FALSE, fig.width=8, fig.height=3}
+checkresiduals(dati.decomposed.stl$time.series[, "remainder"])
+```
+
+Da questa decomposizione si nota che non è più presente una correlazione nei 
+residui, infatti il p-value del test di Ljung-Box è maggiore dell'alpha 
+generalmente fissato a 0.05, il che porta a non poter rifiutare l'ipotesi nulla:
+
+$$H_0: \text{Non è presente correlazione nei residui}$$
+$$\text{contro}$$
+$$H_1: \text{È presente correlazione nei residui}$$
+
+```{r Estrazione componenti, warning=FALSE, include=FALSE}
+trend <- as.numeric(dati.decomposed.stl$time.series[, "trend"])
+stagione <- as.numeric(dati.decomposed.stl$time.series[, "seasonal"])
+residui <- as.numeric(dati.decomposed.stl$time.series[, "remainder"])
+
+# Serie destagionalizzata e detrendizzata
+serie_detrend <- dati.ts - trend
+serie_deseas <- dati.ts - stagione
+```
+
+
+\newpage
+
+# Identificazione del modello
+
+Per l'dentificazione del modello sarà come prima cosa necessario verificare che 
+la serie storica sia stazionaria, dopo di che si potrà procedere con la scelta di un apposito modello che meglio si adatti ai dati.
+
+## Analisi della stazionarietà
+
+Come detto per prima cosa va verificata la stazionarietà dei dati.
+
+Si parta verificando la stazionarietà in varianza della serie storica, per farlo 
+si crei il grafico dello Standard-Deviation Mean plot, in maniera da verificare 
+che i valori dello standard-deviation siano costanti in tutta la serie storica e 
+che quindi sia presente omoschedasticità nei dati.
+
+
+
+```{r Standard-Deviation Mean plot, echo=FALSE, warning=FALSE}
+serie_diff <- dati.ts
+medie_diff <- rep(0,12)
+sd_diff <- rep(0,12)
+n_blocchi <- 12
+n_per_blocco <- floor(length(serie_diff) / n_blocchi)
+
+medie_diff <- rep(0, n_blocchi)
+sd_diff <- rep(0, n_blocchi)
+
+k <- 1
+for (i in 1:n_blocchi) {
+  inizio <- k
+  fine <- min(k + n_per_blocco - 1, length(serie_diff))
+  blocco <- serie_diff[inizio:fine]
+  
+  medie_diff[i] <- mean(blocco, na.rm = TRUE)
+  sd_diff[i] <- sd(blocco, na.rm = TRUE)
+  
+  k <- fine + 1
+}
+
+serie_diff_log <- log(dati.ts)
+medie_diff_log <- rep(0,12)
+sd_diff_log <- rep(0,12)
+n_blocchi <- 12
+n_per_blocco <- floor(length(serie_diff_log) / n_blocchi)
+
+medie_diff_log <- rep(0, n_blocchi)
+sd_diff_log <- rep(0, n_blocchi)
+
+k <- 1
+for (i in 1:n_blocchi) {
+  inizio <- k
+  fine <- min(k + n_per_blocco - 1, length(serie_diff_log))
+  blocco <- serie_diff_log[inizio:fine]
+  
+  medie_diff_log[i] <- mean(blocco, na.rm = TRUE)
+  sd_diff_log[i] <- sd(blocco, na.rm = TRUE)
+  
+  k <- fine + 1
+}
+
+medie <- c(medie_diff, medie_diff_log)
+std <- c(sd_diff, sd_diff_log)
+
+colori <- c(rep("black", 12), rep("red", 12))
+
+SDM <- ggplot(cbind(medie_diff, sd_diff)) + 
+    geom_point(aes(x = medie_diff, y = sd_diff, size = 12), show.legend = F) +
+    ggtitle("Standard-Deviation Mean plot dati")
+
+SDM.log <- ggplot(cbind(medie_diff_log, sd_diff_log)) + 
+    geom_point(aes(x = medie_diff_log, y = sd_diff_log, size = 12), show.legend = F) +
+    ggtitle("Standard-Deviation Mean plot log(dati)") + ylim(0,1)
+
+SDM / SDM.log
+```
+
+Osservando i due grafici si nota che c'é un grande miglioramento nell'eteroschedasticità 
+dei dati applicando una trasformazione logaritmica, bisogna infatti sottolineare 
+che la scala dell'asse delle ordinate è differente.
+
+Ne consegue che la trasformazione logaritmica sia molto utile per stabilizzare 
+le oscillazioni nella serie storica.
+
+Per verificare la stazionarietà della serie storica non ci si può basare sui 
+dati di partenza in quanto sembra essere presente, come notato in precedenza, 
+una forte presenza di trend e stagionalità, il che porta alla necesstà di 
+rimuoverle.
+
+\newpage
+
+Si parta creando la serie delle differenze a lag(12) per eliminare la 
+stagionalità.
+
+
+$$\nabla_s X_t = X_t - X_{t-s}$$
+$$\text{in questo caso specifico}$$
+$$\nabla_{12} X_t = X_t - X_{t-12}$$
+
+Dopo averla creata si proceda facendo l'Augmented Dickey–Fuller Test, un test 
+per verificare la stazionarietà di una serie storica, nello specifico le ipotesi 
+del test sono le seguenti:
+
+
+$$H_0: \text{La serie è non stazionaria}$$
+$$\text{contro}$$
+$$H_1: \text{La serie è stazionaria}$$
+
+```{r Serie differenze stagionali e ADF, echo=FALSE, warning=FALSE}
+dati.NoSt <- diff(log(dati.ts), 12)
+adf.test(dati.NoSt)
+```
+
+Dato il p-value del test, che risulta essere minore della soglia generalmente 
+fissata a 0.05 si rifiuta l'ipotesi nulla $H_0$ che la serie sia non 
+stazionaria, quindi possiamo dire che la differenziazione utilizzata basta 
+poiché rende la serie stazionaria, non sarà infatti necessario differenziare o 
+trasformare la serie ulteriormente.
+
+\newpage
+
+Per avere anche una conferma grafica della stagionalità si guardino anche i grafici 
+delle serie storiche.
+
+```{r Conferma stagionalità con grafici, echo=FALSE, warning=FALSE}
+P1 <- log(dati.ts) |> autoplot() +
+    labs(title = "log(dati)") + theme_bw()
+
+P2 <- dati.NoSt |> autoplot() +
+    labs(title = "log(dati) con differenziazione stagionale a lag(12)") + 
+    theme_bw()
+
+P1 / P2
+```
+
+Anche guardando graficamente il cambiamento apportato dalla differenziazione 
+stagionale è visibile come la serie possa essere considerata stazionaria dopo 
+la differenziazione a lag(12).
+
+```{r Calcolo varianze SS, warning=FALSE, include=FALSE}
+# Confronto varianze da completare
+varsslog <- var(log(dati.ts))
+
+varsslogdiff <- var(diff(log(dati.ts), 12))
+```
+
+Ed ora come ultimo passo si verifichi se c'è una riduzione anche nella 
+varianza dei dati confrontando le varianze delle serie storiche:
+
+- Varianza serie con trasformazione logaritmica: `r varsslog`
+
+- Varianza serie con trasformazione logaritmica e differenziazione a lag(12): `r varsslogdiff`
+
+\newpage
+## Costruzione e scelta del modello
+
+Una volta differenziata la serie storica si guardi alle ACF e PACF per 
+avere un'idea dei valori da utilizzare per identificare il modello, tenendo 
+sempre conto che si sta guardando alle autocorrelazioni della serie con la 
+stagionalità rimossa, il che porta già all'idea che sarà necessario usare 
+un modello SARIMA (Seasonal ARIMA), cioè un modello ARIMA che tiene conto anche 
+della differenziazione stagionale.
+
+
+$$W_t = \nabla^d\nabla^D_sX_t$$
+$$\text{anche se in questo caso la differenziazione è utile solo a lag(12)}$$
+$$W_t = \nabla^1_{12}X_t$$
+$$\text{di conseguenza il modello può essere scritto come}$$
+$$X_t \thicksim ARIMA(p,d,q) \times (P,D,Q)_s$$
+
+
+Si guardino quindi le autocorrelazioni globali e parziali.
+
+```{r ACF e PACF serie differenze, echo=FALSE, fig.height=4, fig.width=8, warning=FALSE}
+G5 <- dati.NoSt |> ggAcf(lag.max = 36) +
+    labs(title = "Autocorrelation function",
+         x = "Lag (mesi)",
+         y = "") +
+    theme_bw()
+
+G6 <- dati.NoSt |> ggPacf(lag.max = 36) +
+    labs(title = "Partial-Autocorrelation function",
+         x = "Lag (mesi)",
+         y = "") +
+    theme_bw()
+
+G5 / G6 + plot_annotation(title="Analisi grafica della correlazione della serie storica resa stazionaria")
+```
+
+Come si nota guardando i grafici entrambi sembrano essere presente un punto di troncamento a lag(3) per l'ACF e a lag(1) per il PACF, il limita la ricerca del modello ad alcuni determinati valori di p,q,P,Q, dato che ci si potrebbe trovare in vari casi diversi tra cui ad esempio:
+
+
+$$p=1 \ \ e \ \ q = 1 \ \ e \ \ P=1 \ \ e \ \ Q=1  \implies \ SARIMA(1,0,1)\times(1,1,1)_{12}$$
+
+Questo se si presuppone ci si trovi davanti ad un processo misto dove è presente sia la componente autoregressiva che quella di media mobile e anche le componenti stagionali di entrambe.
+
+$$p=0 \ \ e \ \ q = 3 \ \ e \ \ P=0 \ \ e \ \ Q=1  \implies \ SARIMA(0,0,3)\times(0,1,1)_{12}$$
+Questo invece basato sul troncamento dell'ACF a lag(3) e supponendo un decadimento esponenziale delle autocorrelazioni parziali verso lo 0.
+
+$$\text{tutto questo perché come detto in precedenza d = 0}$$
+$$\text{dato che non si fa differenziazione diversa da lag(12)}$$
+
+
+
+\newpage
+
+Per la selezione del modello che meglio si adatta ai dati verranno utilizzati dei criteri d'informazione, nello specifico:
+
+$$AIC = -2log(L)+2k$$
+$$AIC_C = AIC + \frac{2(k+1)(k+2)}{T-k-2}$$
+$$BIC = -2log(L) + klog(T)$$
+$$CAIC = -2log(L) + k(log(T) + 1) = BIC + k$$
+$$\text{dove}$$
+$$\text{L = funzione di verosimiglianza}$$
+$$\text{k = numero di parametri da stimare ( (p + q) + (P + Q) + 1 )}$$
+$$\text{T = dimensione campionaria}$$
+
+\newpage
+
+Di seguito la tabella con tutti i risultati da modelli SARIMA creati per tutte 
+le combinazioni possibili fra quelle utili dei valori di p, q, P e Q.
+
+```{r Creazione modelli, echo=FALSE, warning=FALSE}
+valori_possibili <- 0:1
+
+combs <- expand.grid(
+    p    = valori_possibili,
+    q    = 0:3,
+    P    = valori_possibili,
+    Q    = valori_possibili,
+    AIC  = NA,
+    AICC = NA,
+    BIC  = NA,
+    CAIC = NA
+)
+
+for (r in 1:nrow(combs)){
+    fit <- arima(log(dati.ts), 
+                 order = c(combs[r, 1], 0, combs[r, 2]),               # (p,d,q) NON stagionale
+                 seasonal = list(order=c(combs[r, 3], 1, combs[r, 4]), # (P,D,Q)     stagionale
+                                 period=12))
+    L      <- fit$loglik
+    k      <- sum(combs[r, 1:4]) + 1
+    Td     <- fit$nobs
+    
+    AIC    <- fit$aic
+    AICmio <- round((-2 * L) + (2 * k), 2)
+    AICC   <- round(AIC + ( (2*(k+1)*(k+2)) / (Td-k-2) ), 2)
+    BIC    <- round((-2*L) + (k*log(Td)), 2)
+    CAIC   <- round(BIC + k, 2)
+    
+    combs[r, 5:8] <- c(AICmio, AICC, BIC, CAIC)
+}
+```
+
+```{r Confronto modelli e scelta definitiva, echo=FALSE, warning=FALSE}
+evidenzia_minimi <- function(df) {
+  df_formattato <- df
+  
+  for(col in names(df)) {
+    if (col %in% c("p", "q", "P", "Q")){next}
+    else if(is.numeric(df[[col]])) {
+      min_val <- min(df[[col]], na.rm = TRUE)
+      df_formattato[[col]] <- ifelse(
+        df[[col]] == min_val,
+        cell_spec(df[[col]], bold = TRUE, color = "red", format = "latex"),
+        as.character(df[[col]])
+      )
+    }
+  }
+  return(df_formattato)
+}
+
+combs |>
+  evidenzia_minimi() |>
+  kable(escape = FALSE, format = "latex", booktabs = TRUE) |>
+  kable_styling(latex_options  = "hold_position")
+
+minimi <- c(
+    which.min(combs$AIC),
+    which.min(combs$AICC),
+    which.min(combs$BIC),
+    which.min(combs$CAIC)
+)
+#+ Si scelga il modello con il maggior numero di metriche al minimo 
+#+ (applica il principio di parsimonia)
+fit.n <- as.integer(names(which.max(table(minimi))))
+fit <- arima(log(dati.ts), 
+             order = c(combs[fit.n, 1], 0, combs[fit.n, 2]),
+             seasonal = list(order=c(combs[fit.n, 3], 1, combs[fit.n, 4]), 
+                             period=12))
+```
+
+Dalla tabella non risulta essere presente un modello migliore secondo ogni criterio, tuttavia si può proseguire utilizzando il principio di parsimonia, il quale porterebbe a scegliere il modello con meno parametri fra quelli con criteri d'informazione minori, oppure guardando il BIC, che difatti penalizza i modelli con un numero maggiore di parametri portandoci a scegliere i medesimi valori di p, q, P e Q.
+
+Di conseguenza il modello da scegliere è il seguente:
+
+$$X_t \thicksim ARIMA(1,0,1)\times(0,1,1)_{12}$$
+$$\text{anche scrivibile come}$$
+$$
+\phi_1(L)\Phi_0(L^{12})\nabla^0\nabla^1_{12}X_t = 
+\theta_1(L)\Theta_1(L^{12})\epsilon_t
+$$
+
+\newpage
+# Verifica del modello
+
+Per verificare l'adeguatezza del modello scelto alla serie storica di 
+riferimento si proceda effettuando l'analisi dei residui.
+
+## Analisi dei residui
+
+I residui non sono altro che la differenza fra il valore della serie storica in 
+un determinato momento e il valore che viene trovato utilizzando il modello 
+scelto.
+
+$$
+\hat{\epsilon_t} = X_t - (\hat{\delta} + \sum_{i=1}^p\hat\phi_iX_{t-i} + \sum_{i=1}^q\hat\theta_i\hat\epsilon_{t-i})
+$$
+
+Un buon modello dovrebbe avere i residui che si comportano come un White Noise, 
+che è un processo di media $0$ e varianza $\sigma^2$, e soprattutto assenza di 
+correlazione fra le osservazioni.
+
+Per verificare quanto appena detto si faccia prima un'analisi grafica andando a 
+guardare prima la serie storica dei residui e successivamente le loro
+autocorrelazioni.
+
+
+```{r Plot TS + AFC-PACF Residui, echo=FALSE, warning=FALSE}
+checkresiduals(fit$residuals)
+```
+
+Dal grafico della serie storica sembra che i valori dei residui si 
+muovano in maniera aleatoria attorno allo 0 con una variabilità costante, il che 
+porterebbe ad accettare il fatto che si comportino come un White Noise.
+
+Si noti tuttavia, guardando anche l'istogramma dei residui, che sono presenti 
+valori dei residui particolarmente alti, questo probabilmente perché, nonostante 
+il modello si sia adattato alla stagionalità presente nei dati che porta ad un 
+aumento nei mesi attorno a Settembre, sono comunque presenti casi in cui 
+l'aumento è imprevedibilmente maggiore del solito.
+
+Osservando invece le autocorrelazioni globali si nota che risultano essere 
+uguali a 0 ad ogni lag, il che sta a significare che non è presente correlazione 
+fra i residui.
+
+Infine si può dire che il p-value del test di Ljunge-Box risulta essere maggiore 
+di 0.05 e di conseguenza non si rifiuta l'ipotesi nulla di non autocorrelazione 
+nei residui.
+
+Per verificare definitivamente la normalità dei residui però si prosegua con il grafico qqplot e formalizzando un test.
+
+```{r qq-plot residui, echo=FALSE, warning=FALSE}
+qqnorm(fit$residuals)
+qqline(fit$residuals)
+```
+
+Dal grafico qqnorm i residui non sembrano essere distribuiti normalmente ad eccezione di valori dei residui particolarmente estremi che come detto in precedenza dipendono da casi particolari.
+
+\newpage
+
+Come test invece sono 2 i principali che potrebbero essere utilizzati, il test Jarque-bera e Shapiro-Wilk, generalmente interscambiabili ma preferibili per motivi differenti, in questo caso specifico si scelga il metodo Jarque-bera.
+
+$$H_0: \text{I residui sono distribuiti normalmente}$$
+$$\text{contro}$$
+$$H_1: \text{I residui non sono distribuiti normalmente}$$
+
+```{r Shapiro-Wilk test, echo=FALSE, warning=FALSE}
+jarque.bera.test(fit$residuals)
+```
+
+Come si nota il p-value del test è inferiore alla soglia 0.05, e di conseguenza si rifiuta l'ipotesi nulla di normalità dei residui e quindi si conclude che questi ultimi non sono distribuiti normalmente.
+
+\newpage
+
+Il passaggio successivo nell'analisi dei residui del modello è quello di 
+osservare i grafici dei residui standardizzati e del loro quadrato.
+
+$$
+\text{Residui standardizzati: }\hat\epsilon_t^* = \frac{(\hat\epsilon_t - \hat{\overline\epsilon_t})}{\hat\sigma_\epsilon}
+$$
+
+```{r Analisi residui standardizzati, echo=FALSE, warning=FALSE}
+res.std <- (fit$residuals - mean(fit$residuals)) / (fit$sigma2)^0.5
+
+G7 <- res.std |> autoplot() +
+    labs(title = "Residui standardizzati", 
+         x = "Tempo", y = "") + theme_bw()
+
+G8 <- res.std^2 |> autoplot() +
+    labs(title = "Residui standardizzati al quadrato", 
+         x = "Tempo", y = "") + theme_bw()
+G7 / G8
+```
+
+Generalmente si guardano questi grafici per verificare alcune cose, nello specifico all'interno del grafico dei residui standardizzati la maggior parte delle osservazioni dovrebbe essere all'interno dell'intervallo [-2, 2] (all'incirca almeno il 95%), nel nostro caso il `r round((sum(abs(res.std)<2))/length(res.std)*100, 2)`% si trova in questo intervallo.
+
+Invece guardando i residui standardizzati al quadrato ci si accerta che non siano presenti dei "cluster", cioè delle zone dove sono presenti residui molto grandi in successione, fortunatamente nel caso in esame questo non accade, quindi si può terminare l'analisi dei residui.
+
+
+
+\newpage
+# Previsione della serie storica
+
+Quello che probabilmente è da considerare il fine per il quale vengono studiate maggiormente le serie storiche è quello della *previsione*.
+
+Prevedere valori futuri può infatti tornare molto utile in tantissimi casi, prendendo ad esempio il caso in esame, una previsione delle ricerche per la parola "Apple" potrebbe aiutare la gestione dei flussi del sito del brand per allocare proattivamente risorse server aggiuntive, aumentare la banda disponibile o ancora attivare sistemi di cache distribuiti.
+Oltretutto potrebbe anche risultare molto utile per lanciare delle offerte proprio nei periodi in cui ci si aspetta maggiore affluenza.
+
+Esistono tanti metodi che possono essere usati per la previsione di serie storiche, scegliere il più adatto infatti non è mai un procedimento immediato.
+
+In questo preciso studio ci si concentrerà sulla previsione h-step ahead per h da 1 a 12, in maniera da avere previsioni per un anno.
+
+## Previsori utilizzati
+
+Per la previsione di questa serie storica si sono scelti i seguenti previsori, ognuno con le proprie motivazioni.
+
+1. Naïve method
+
+Questo metodo è senza dubbio il più semplice in quanto punta a prevedere il prossimo valore della serie storica utilizzando quello precedente ad esso ed ipotizzando quindi che la serie storica non si discosti più dall'ultimo valore assunto.
+
+$$
+X_T(h) = X_T
+$$
+
+2. Seasonal naïve method
+
+Questo metodo è uno dei metodi di previsione più semplici che esistano in quanto punta a prevedere utilizzando l'ultimo valore osservato appartenente all'ultimo ciclo stagionale, il che fa intuire ovviamente che sia utile solo con serie storiche con una stagionalità marcata, come per l'appunto in questo caso.
+
+$$
+X_T(h) = X_{T+h-m(k+1)}
+$$
+$$\text{dove}$$
+$$\text{m = periodo della stagionalità}$$
+$$k = floor(\frac{h-1}{m})$$
+
+3. Drift method
+
+Questo metodo consiste nell'avere una previsione che aumenta o decrementa in maniera costante in tutto l'orizzonte previsivo, nello specifico il cambiamento che si ottiene coincide con quello che si è avuto nei dati storici precedenti.
+
+$$
+X_T(h) = X_T +h(\frac{X_T-X_1}{T-1})
+$$
+
+4. Previsione con la decomposizione
+
+Costruendo un previsore che si basa sulla decomposizione della serie storica si cerca di creare una previsione che si basa sul metodo di decomposizione scelto per la serie storica, in questo caso il metodo STL, grazie al quale si crea una previsione in base a trend e stagionalità stimati.
+
+$$
+X_T(h) = \hat{T}_{n+h} + \hat{S}_{n+h} + \hat{R}_{n+h}
+$$
+
+Si procede quindi stimando separatamente Trend, Stagionalità e Residui, tuttavia quest'ultimi possono anche non essere stimati qualora nella fase di decomposizione ci si rende conto che non è presente correlazione e che hanno media 0.
+
+5. Previsione con il modello SARIMA
+
+Infine quelli che probabilmente sono considerati i migliori metodi per la previsione di una serie storica univariata sono proprio i modelli ARIMA di cui si è già discusso e che hanno portato alla scelta precedente di un modello $SARIMA(1,0,1)(0,1,1)_{12}$.
+
+```{r Creazione previsori, echo=FALSE, warning=FALSE}
+orizzonte.previsione <- 12
+idxs <- length(dati.ts) - orizzonte.previsione
+train.set <- head(log(dati.ts), n = idxs)
+test.set  <- tail(log(dati.ts), n = length(dati.ts)-idxs)
+H <- length(test.set)
+
+fit.N      <- naive(train.set, h = orizzonte.previsione)
+fit.SN     <- snaive(train.set, h = orizzonte.previsione)
+fit.drift  <- rwf(train.set, h = orizzonte.previsione, drift=TRUE)
+fit.dec    <- stlf(train.set, method = "arima", h = orizzonte.previsione, 
+                   s.window = "periodic", robust = TRUE, level = c(80, 95))
+fit.SARIMA <- arima(train.set, 
+             order = c(combs[fit.n, 1], 0, combs[fit.n, 2]),
+             seasonal = list(order=c(combs[fit.n, 3], 1, combs[fit.n, 4]), 
+                             period=12), include.mean = FALSE)
+prev.SARIMA <- forecast(fit.SARIMA, h = orizzonte.previsione, level = c(80, 95),
+                        biasadj = TRUE, lambda = 0)
+```
+
+## Selezione del previsore
+
+Dopo aver presentato i 4 previsori che saranno utilizzati sarà necessario scegliere correttamente quello da utilizzare per la previsione, proprio per questo verranno prima confrontate le previsioni graficamente e successivamente verranno utilizzate per il confronto 4 metriche (MAE, RMSE, $U_1$, $U_2$).
+
+Da sottolineare è che i valori delle previsioni valutate graficamente saranno riportati a quelli corrispondenti sulla serie storica iniziale applicando una back-transformation.
+
+$$
+\hat{X}_t(h) = exp(\hat{Y}_t(h))\cdot[1+\frac{\hat{\sigma_h}^2}{2}]
+$$
+
+```{r Confronto previsioni graficamente, echo=FALSE, warning=FALSE}
+correzione <- function(prev){
+    V <- var(prev)
+    return(exp(prev)*(1+(V/2)))
+}
+
+percentuale_zoom <- 0.2
+
+autoplot(tail(dati.ts, percentuale_zoom*length(dati.ts)),) + 
+    autolayer(correzione(fit.N$mean), series = "Naive") +
+    autolayer(correzione(fit.SN$mean)*(1+(var(fit.SN$mean))), series = "Seasonal Naive") +
+    autolayer(correzione(fit.drift$mean), series = "Drift method") +
+    autolayer(correzione(fit.dec$mean), series = "STL") +
+  labs(y = 'Ricerche',
+       title = 'Confronto previsioni',
+       colour = 'Metodo') +
+   theme(
+    legend.position = c(0.2275, 0.64),      # basso a destra
+    legend.justification = c("right", "bottom"),
+    legend.background = element_rect(
+      fill = "white",
+      colour = "black"
+    )
+  )
+```
+
+Guardando le previsioni graficamente sembra indubbio che le previsioni fatte utilizzando il previsore Seasonal Naïve, ma soprattutto STL siano le migliori fra quelle utilizzate finora, questo perchè riescono a cogliere abbastanza bene le dinamiche stagionali della serie.
+
+Dopo aver osservato le 4 previsoni più semplici si passi a vedere quella del modello SARIMA trovato in precedenza tenendo conto anche degli intervalli di previsione al 80% e 95%,.
+
+```{r Grafico previsione SARIMA, echo=FALSE, warning=FALSE}
+autoplot(tail(dati.ts, 0.2*length(dati.ts))) + 
+  autolayer((prev.SARIMA), alpha = 0.25) + 
+  labs(y = 'Ricerche', title = TeX("Forecast con SARIMA$(1,0,1)\times(0,1,1)_4$"))
+```
+
+Osservando questo grafico si nota che la previsione sembra essere più accurata, e che soprattutto il vero valore assunto dalla serie storica è quasi sempre contenuto all'interno dell'intervallo di previsione al 95%.
+
+Tuttavia per scegliere il previsore migliore ci si baserà anche sul calcolo di varie metriche di accuratezza previsiva che saranno confrontate per tutti i modelli previsivi utilizzati.
+
+```{r Metriche di errore per le previsioni, echo=FALSE, warning=FALSE}
+# Funzioni per U1 e U2
+U1 <- function(prev, val){
+    n <- length(prev)
+    
+    num <- ( (sum((val - prev)^2))/n )^0.5
+    den1 <- ( sum(val^2)/n )^0.5
+    den2 <- ( sum(prev^2)/n )^0.5
+    
+    return(num/(den1+den2))
+}
+
+U2 <- function(prev, val){
+    n <- length(prev)
+    
+    n1 <- (prev[2:n]-val[2:n])/val[1:(n-1)]
+    num <- (sum(n1^2))^0.5
+    
+    n2 <- (val[2:n]-val[1:(n-1)])/val[1:(n-1)]
+    den <- (sum(n2^2))^0.5
+    
+    return(num/den)
+}
+
+test.set.corretto <- exp(test.set)
+err.N      <- test.set.corretto - correzione(fit.N$mean)
+err.SN     <- test.set.corretto - correzione(fit.SN$mean)
+err.drift  <- test.set.corretto - correzione(fit.drift$mean)
+err.dec    <- test.set.corretto - correzione(fit.dec$mean)
+err.SARIMA <- test.set.corretto - prev.SARIMA$mean
+
+metriche.N <- cbind(MAE(err.N), RMSE(err.N),
+                    U1(correzione(fit.N$mean), test.set.corretto),
+                    U2(correzione(fit.N$mean), test.set.corretto))
+
+metriche.SN <- cbind(MAE(err.SN), RMSE(err.SN),
+                     U1(correzione(fit.SN$mean), test.set.corretto),
+                     U2(correzione(fit.SN$mean), test.set.corretto))
+
+metriche.drift <- cbind(MAE(err.drift), RMSE(err.drift),
+                        U1(correzione(fit.drift$mean), test.set.corretto),
+                        U2(correzione(fit.drift$mean), test.set.corretto))
+
+metriche.dec <- cbind(MAE(err.dec), RMSE(err.dec),
+                      U1(correzione(fit.dec$mean), test.set.corretto),
+                      U2(correzione(fit.dec$mean), test.set.corretto))
+
+metriche.SARIMA <- cbind(MAE(err.SARIMA), RMSE(err.SARIMA),
+                         U1(prev.SARIMA$mean, test.set.corretto),
+                         U2(prev.SARIMA$mean, test.set.corretto))
+
+Metriche <- rbind(Naïve = metriche.N,
+                  Seasonal.Naïve = metriche.SN,
+                  Drift.Method = metriche.drift,
+                  STL = metriche.dec,
+                  SARIMA = metriche.SARIMA)
+colnames(Metriche) <- c("MAE", "RMSE", "U1", "U2")
+rownames(Metriche) <- c("Naïve", "Seasonal Naïve", "Drift method", "STL", "SARIMA")
+Metriche |> round(3) |> as.data.frame() |>
+  evidenzia_minimi() |>
+  kable(escape = FALSE, format = "latex", booktabs = TRUE) |>
+  kable_styling(latex_options  = "hold_position")
+```
+
+Dopo aver confrontato i modelli anche grazie al supporto delle metriche si concluda affermando che il modello migliore è la decomposizione Seasonal-Trend che usa LOESS.
+
+Tuttavia il modello SARIMA, ha valori delle metriche molto simili a quelle della STL, quindi potrebbe essere in realtà che la scelta effettuata sia solamente frutto della serie storica di studio e che quindi anche l'utilizzo di un modello SARIMA per la previsione non sia da escludere.
+
+\newpage
+
+# Conclusioni
+
+L'analisi della serie storica sul numero di ricerche mensili per il termine Apple su Google ha evidenziato vari aspetti interessanti:
+
+- Il trend è tendenzialmente crescente, confermando una realtà in continua crescita;
+
+- È presente una stagionalità annuale molto marcata a partire dal 2011 che presenta picchi in ogni Settembre;
+
+- La decomposizione migliore trovata è stata la decomposizione additiva che usa LOESS;
+
+- I dati risultano essere stazionari dopo aver effettuato una trasformazione logaritmica e aver fatto una differenziazione stagionale;
+
+- Il modello che meglio si adatta ai dati osservati è il seguente: $ARIMA(1,0,1)\times(0,1,1)_{12}$.
+
+- Dal punto di vista previsivo è emerso che il modello che genera le previsioni migliori è quello che usa la decomposizione LOESS.
+
+
+# Riferimenti
+
+1. http://trends.google.it/trends/explore?date=all&q=apple&hl=it

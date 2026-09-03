@@ -1,0 +1,996 @@
+---
+title: "Analisi Serie Storica - Tasso di Occupazione (No College)"
+author: "Francesco P. | Gabriele S."
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: 3
+    number_sections: yes
+  html_document:
+    toc: yes
+    toc_depth: '3'
+    df_print: paged
+---
+
+
+<!-- Per far sì che la legenda sia da sola -->
+\newpage
+
+```{r Libraries, include=FALSE, warning=FALSE}
+# Librerie utili per il progetto in ordine di utilizzo
+## Librerie base
+library(tidyverse)
+
+# Dataframe specializzati per serie temporali
+library(tsibble)
+
+# Con questa possiamo fare modelli ARIMA, ETS e decomposizione
+library(forecast)
+
+# Utile per organizzare i grafici di ggplot
+library(patchwork)
+
+# Utile per test statistici per serie temporali (stazionarietà, unit root tests)
+library(tseries)
+
+# Utile per praticamente tutto, utilizzata per decomposizione e analisi
+library(fpp3)
+
+# Serve ad evidenziare i minimi/massimi nelle tabelle in output pdf
+library(kableExtra)
+
+# Per etichette nei grafici
+library(ggrepel)
+
+# Per calcolare il mape
+library(Metrics)
+
+# Per usare stringhe combinate con Latex
+library(latex2exp)
+```
+
+```{r Import data, warning=FALSE, include=FALSE}
+# Importo i dati dal file CSV
+dati <- read.table(file=url("https://francesco2003gg.github.io/datasets/EmployeeNoCollege.dat"), 
+                   header = TRUE)
+colnames(dati) <- c("Data", "Disoccupati")
+```
+
+```{r Modify data, warning=FALSE, include=FALSE}
+# Conversione in formato tsibble per analisi serie temporali
+dati <- dati |>
+    mutate(Data = yearquarter(Data)) |>
+    as_tsibble(index = Data)
+
+# Creo anche un oggetto ts per alcune analisi
+dati.ts <- ts(dati$Disoccupati, 
+              start = c(2000, 1), 
+              frequency = 4)  # Frequenza trimestrale
+```
+
+# Introduzione
+
+Il mercato del lavoro rappresenta uno degli indicatori più importanti per valutare lo stato di salute di un'economia. In particolare, il tasso di occupazione tra le persone che non hanno frequentato il college costituisce una metrica fondamentale per comprendere le dinamiche occupazionali di una significativa porzione della forza lavoro.
+
+Questa serie storica [1] (informazioni aggiuntive nei riferimenti) analizza il numero di occupati (espressi in migliaia) senza formazione universitaria negli Stati Uniti dal primo trimestre del 2000 al quarto trimestre del 2025. I dati, forniti con frequenza trimestrale, permettono di osservare come questo segmento della popolazione sia stato influenzato da vari eventi economici negli ultimi 25 anni.
+
+L'analisi di questa serie temporale risulta particolarmente rilevante per diversi motivi:
+
+- Permette di identificare trend di lungo periodo nel mercato del lavoro;
+
+- Evidenzia l'impatto di crisi economiche (come quella del 2008 e la pandemia del 2020);
+
+- Fornisce indicazioni utili per politiche del lavoro e formative;
+
+- Aiuta a comprendere la ciclicità e la stagionalità dell'occupazione.
+
+In questo studio applicheremo diverse tecniche di analisi delle serie storiche per:
+
+1. Identificare le componenti principali della serie (trend, stagionalità);
+
+2. Verificare le proprietà statistiche della serie;
+
+3. Applicare modelli di decomposizione appropriati;
+
+4. Selezionare e stimare modelli ARIMA/SARIMA adeguati.
+
+\newpage
+
+# Analisi della serie storica
+
+## Analisi di base
+
+Iniziamo con una visualizzazione generale della serie storica per identificare le caratteristiche principali.
+
+```{r Autoplot, echo=FALSE, warning=FALSE, fig.width=8, fig.height=4}
+# Identifico i punti di massimo e minimo
+max_punto <- dati |>
+    filter(Disoccupati == max(Disoccupati))
+
+min_punto <- dati |>
+    filter(Disoccupati == min(Disoccupati))
+
+# Plot della serie con punti notevoli
+dati |> autoplot(Disoccupati) +
+    labs(title = "Numero di occupati senza College (2000 Q1 - 2025 Q4)", 
+         x = "Trimestre", 
+         y = "Numero di occupati") +
+    geom_point(data = max_punto, 
+               aes(x = Data, y = Disoccupati), 
+               color = "red", size = 2) +
+    geom_label_repel(data = max_punto,
+                     aes(x = Data, y = Disoccupati,
+                         label = paste0("Max: ", format(Data, "%Y Q%q"))),
+                     color = "red",
+                     fontface = "bold",
+                     nudge_y = 1000) +
+    geom_point(data = min_punto, 
+               aes(x = Data, y = Disoccupati), 
+               color = "blue", size = 2) +
+    geom_label_repel(data = min_punto,
+                     aes(x = Data, y = Disoccupati,
+                         label = paste0("Min: ", format(Data, "%Y Q%q"))),
+                     color = "blue",
+                     fontface = "bold",
+                     nudge_y = -1000) +
+    theme_bw()
+```
+
+Dal grafico emergono diverse caratteristiche importanti:
+
+- **Shock significativi**: Si notano almeno due grandi shock:
+  - La crisi finanziaria del 2008-2009 con un forte aumento della disoccupazione
+  - La pandemia COVID-19 nel 2020 con un picco improvviso e pronunciato
+- **Trend variabile**: Non c'è un trend lineare costante, ma piuttosto periodi alternati di crescita e decrescita
+- **Possibile stagionalità**: Potrebbero esserci pattern stagionali che necessitano di ulteriore analisi
+
+
+
+\newpage
+
+## Analisi della stagionalità
+
+Verifichiamo la presenza di pattern stagionali nei dati trimestrali.
+
+```{r Seasonality, echo=FALSE, warning=FALSE, fig.width=8, fig.height=4}
+# Seasonal plot
+dati |> gg_season(Disoccupati, labels = "both") +
+    labs(title = "Plot Stagionale - Occupati per Trimestre",
+         x = "Trimestre", 
+         y = "Numero di occupati") + 
+    theme_bw()
+```
+
+```{r Subseries plot, echo=FALSE, warning=FALSE, fig.width=8, fig.height=4}
+# Subseries plot per vedere le medie per ogni trimestre
+dati |> gg_subseries(Disoccupati) +
+    labs(title = "Subseries Plot - Media per Trimestre",
+         x = "Anno", 
+         y = "Numero di occupati") +
+    theme_bw()
+```
+
+Dall'analisi dei plot stagionali possiamo osservare:
+
+- **Stagionalità debole**: Non emerge un pattern stagionale forte e consistente
+- **Dominanza del ciclo economico**: Le variazioni cicliche dovute a fattori economici sembrano dominare qualsiasi effetto stagionale
+- **Eterogeneità tra anni**: I diversi anni mostrano comportamenti molto diversi, influenzati più da eventi macroeconomici che da fattori stagionali
+
+## Analisi dell'autocorrelazione
+
+Esaminiamo la struttura di autocorrelazione della serie per comprendere meglio le dipendenze temporali.
+
+```{r ACF e PACF, echo=FALSE, warning=FALSE, fig.width=8, fig.height=6}
+# ACF plot
+G1 <- ggAcf(dati.ts, lag.max = 20) +
+    labs(title = "Funzione di Autocorrelazione (ACF)",
+         x = "Lag (trimestri)",
+         y = "ACF") +
+    theme_bw()
+
+# PACF plot
+G2 <- ggPacf(dati.ts, lag.max = 20) +
+    labs(title = "Funzione di Autocorrelazione Parziale (PACF)",
+         x = "Lag (trimestri)",
+         y = "PACF") +
+    theme_bw()
+
+G1 / G2
+```
+
+L'analisi dell'autocorrelazione rivela:
+
+- **Forte persistenza**: L'ACF decresce lentamente, suggerendo la presenza di non stazionarietà in media. 
+- **Necessità di differenziazione**: Il pattern suggerisce che potrebbe essere necessaria una differenziazione per rendere la serie stazionaria in media. 
+
+\newpage
+
+# Decomposizione della serie storica
+
+L'obiettivo di questa sezione è quello di individuare la migliore tecnica di decomposizione in grado di scomporre tale fenomeno complesso nelle sue componenti fondamentali (trend, stagionalità, residua), in modo da poterle osservare e studiare separatamente. 
+
+Proveremo qui di seguito diversi approcci e sceglieremo il metodo di decomposizione che meglio isola le componenti dal rumore casuale. La scelta del metodo più adeguato sarà guidata dall’analisi dei residui stimati, valutandone le proprietà statistiche e la loro approssimazione a un processo white noise.
+
+## Decomposizione Classica
+
+Iniziamo con una decomposizione classica additiva. 
+
+\[
+X_t = T_t + S_t + R_t
+\]
+
+dove $X_t$ è il valore osservato al tempo $t$, $T_t$ rappresenta il trend, $S_t$ la componente stagionale e $R_t$ la componente residua.
+
+```{r Decomposizione Classica, echo=FALSE, warning=FALSE, fig.width=8, fig.height=6}
+# Decomposizione classica
+dec_class <- decompose(dati.ts, type = "additive")
+
+# Plot
+plot(dec_class)
+
+#check dei residui
+checkresiduals(dec_class$random)
+```
+
+L’analisi grafica dei residui evidenzia la presenza di alcuni valori estremi che raggiungono -2000 oppure 1000, molto lontani dalla maggior parte dei residui centrati attorno a zero. Questi outlier possono indicare fenomeni anomali nella serie originale come ad esempio il periodo della pandemia da Covid-19.
+
+Inoltre dal p value del test di Ljung-Box rifiutiamo l'ipotesi nulla, cioè di assenza di autocorrelazione nei residui.  
+
+Concludiamo quindi dicendo che non siamo riusciti a cogliere al meglio la struttura della serie storica.
+
+\newpage
+
+## Decomposizione moltiplicativa
+
+Ora proviamo una decomposizione moltiplicativa:
+
+\[
+X_t = T_t * S_t * R_t
+\]
+
+dove $X_t$ è il valore osservato al tempo $t$, $T_t$ rappresenta il trend, $S_t$ la componente stagionale e $R_t$ la componente residua.
+
+```{r Decomposizione Classica Moltiplicativa, echo=FALSE, warning=FALSE, fig.width=8, fig.height=6}
+# Decomposizione classica
+dec_class <- decompose(dati.ts, type = "multiplicative")
+
+# Plot
+plot(dec_class)
+
+#check dei residui
+checkresiduals(dec_class$random)
+```
+
+Anche in questo caso nonostante la maggior parte dei residui sia centrata intorno allo 0 si verificano dei valori anomali. Inoltre dal p value del test di Ljung-Box rifiutiamo l'ipotesi nulla, cioè di assenza di autocorrelazione nei residui.  
+
+\newpage
+
+## Decomposizione STL
+
+Utilizziamo la decomposizione STL (Seasonal and Trend decomposition using Loess) che è particolarmente robusta per serie con stagionalità variabile.
+
+```{r Decomposizione STL, echo=FALSE, warning=FALSE, fig.width=8, fig.height=7}
+# Decomposizione STL
+dec_stl <- dati |>
+    mutate(Occupati = Disoccupati) |>
+    model(stl = STL(Occupati ~ trend(window = 10) + 
+                    season(window = "periodic"),
+                    robust = TRUE)) |>
+    components()
+
+# Plot della decomposizione
+autoplot(dec_stl) +
+    labs(title = "Decomposizione STL della Serie") +
+    theme_bw()
+
+checkresiduals(dec_stl$remainder)
+```
+
+Anche la decomposizione STL non è riuscita a scomporre la serie nelle sue componenti principali e a generare dei residui che abbiano un comportamento assimilabile a quello di un White Noise, infatti anche in questo caso il p-value del test di Ljung-Box è minore di 0.05.
+
+
+\newpage
+
+
+# Test di stazionarietà
+
+## Stazionarietà in varianza
+
+L'assunzione che la nostra serie storica sia una realizzazione di un processo stazionario è fondamentale ai fini della nostra analisi.  
+Sicuramente la nostra serie storica presenta dei periodi temporali in cui la media è diversa, quindi sicuramente è non stazionaria in media. 
+
+Verifichiamo la non stazionarietà in varianza attraverso uno **standard deviation mean** plot.
+
+```{r, echo=FALSE}
+serie_diff <- dati.ts
+medie_diff <- rep(0,12)
+sd_diff <- rep(0,12)
+n_blocchi <- 12
+n_per_blocco <- floor(length(serie_diff) / n_blocchi)
+
+medie_diff <- rep(0, n_blocchi)
+sd_diff <- rep(0, n_blocchi)
+
+k <- 1
+for (i in 1:n_blocchi) {
+  inizio <- k
+  fine <- min(k + n_per_blocco - 1, length(serie_diff))
+  blocco <- serie_diff[inizio:fine]
+  
+  medie_diff[i] <- mean(blocco, na.rm = TRUE)
+  sd_diff[i] <- sd(blocco, na.rm = TRUE)
+  
+  k <- fine + 1
+}
+
+plot(medie_diff, sd_diff, pch = 16,
+     ylab = 'Standard Deviation',
+     xlab = 'Mean',
+     main = 'Standard Deviation - Mean')
+```
+
+Non abbiamo la presenza di stazionarietà in varianza. 
+Proviamo quindi una trasformata logaritmica.
+
+```{r, echo=FALSE}
+serie_box <- BoxCox(serie_diff, lambda = '0')
+medie_box <- rep(0,12)
+sd_box <- rep(0,12)
+n_blocchi <- 12
+n_per_blocco <- floor(length(serie_box) / n_blocchi)
+
+medie_box <- rep(0, n_blocchi)
+sd_box <- rep(0, n_blocchi)
+
+k <- 1
+for (i in 1:n_blocchi) {
+  inizio <- k
+  fine <- min(k + n_per_blocco - 1, length(serie_box))
+  blocco <- serie_box[inizio:fine]
+  
+  medie_box[i] <- mean(blocco, na.rm = TRUE)
+  sd_box[i] <- sd(blocco, na.rm = TRUE)
+  
+  k <- fine + 1
+}
+
+plot(medie_box, sd_box, pch = 16, ylim = c(0,2),
+     ylab = 'Standard Deviation',
+     xlab = 'Mean',
+     main = 'Standard Deviation - Mean')
+```
+
+Applicando una trasformazione logaritmica ai nostri dati lo standard deviation mean plot migliora di molto, suggerendo che la serie storica adesso risulta essere omoschedastica. 
+
+Da ora in poi lavoreremo con la serie trasformata.
+
+$$
+Y_t = log(X_t)
+$$
+
+\newpage
+
+## Stazionarietà in media
+
+```{r, echo=FALSE}
+log_dati <- log(serie_diff)
+var_log <- var(log_dati)
+autoplot(log_dati) + 
+  labs(title = 'Andamento del numero di occupati senza college',
+       subtitle = 'Serie dei logaritmi')
+```
+
+```{r echo=FALSE}
+adf_log <- adf.test(log_dati, k=0) #k = 0 esegue il test DF classico
+
+ggAcf(log_dati) + ggtitle('ACF serie dei logaritmi')
+```
+
+
+Resta la presenza di stazionarietà in media.
+Lo si nota oltre che dal grafico anche dal decadimento molto lento delle autocorrelazioni globali verso zero.
+
+Si rivela dunque essere necessaria una differenziazione per rendere la serie storica stazionaria. 
+Proviamo una differenza prima sulla serie logaritmica.
+
+```{r, warning=FALSE, echo=FALSE}
+serie_diff <- diff(log_dati)
+var_serie_diff <- var(serie_diff)
+adf_diff <- adf.test(serie_diff)
+
+plot_acf_log <- ggAcf(log_dati) + ggtitle('ACF della serie logaritmica')
+plot_acf_diff <- ggAcf(serie_diff) + ggtitle('ACF della serie delle differenze logaritmiche')
+
+plot_acf_log + plot_acf_diff
+```
+
+Come si può notare dalle autocorrelazioni globali si verifica un punto di troncamento al primo lag. 
+La serie storica così trasformata sembra essere stazionaria.
+
+Altri risultati utili, che comprendono il test di Dickey-Fuller:
+\[
+\text{Test di Dickey-Fuller:} \\
+\begin{cases}
+H_0: \gamma = 0 & \text{(presenza di radice unitaria, serie non stazionaria)} \\
+H_1: \gamma < 0 & \text{(stazionarietà della serie)}
+\end{cases}
+\]
+
+```{r, echo=FALSE}
+tabella_riassuntiva <- data.frame(
+  Serie = c("$\\log(y_t)$", "$\\nabla\\log(y_t)$"),
+  Varianza = c(var_log, var_serie_diff),
+  "p-value DF" = c(adf_log$p.value, adf_diff$p.value)
+)
+knitr::kable(tabella_riassuntiva)
+```
+
+Anche dal p-value del test di Dickey Fuller concludiamo che la serie delle differenze prime è stazionaria. 
+
+La nostra serie quindi è la seguente:
+
+$$
+Y^{'}_t = \nabla Y_t
+$$
+
+\newpage
+
+Graficamente: 
+
+```{r, echo=FALSE}
+autoplot(serie_diff) + labs(title = 'Serie Trasformata numero di occupati',
+                            subtitle = 'Differenziazione del primo ordine della serie logaritmica',
+                            y = 'Value',
+                            x = 'data')
+```
+
+\newpage
+
+# Identificazione del modello
+
+Sulla base dell'analisi ACF/PACF della serie differenziata, identifichiamo possibili modelli ARIMA.
+
+```{r ACF PACF differenziata, echo=FALSE, warning=FALSE, fig.width=8, fig.height=6}
+# ACF e PACF della serie differenziata
+G3 <- ggAcf(serie_diff, lag.max = 20) +
+    labs(title = "ACF - Serie Differenziata",
+         x = "Lag", y = "ACF") +
+    theme_bw()
+
+G4 <- ggPacf(serie_diff, lag.max = 20) +
+    labs(title = "PACF - Serie Differenziata",
+         x = "Lag", y = "PACF") +
+    theme_bw()
+
+G3 / G4
+```
+
+Analizzando i grafici delle funzioni di autocorrelazione (ACF) e autocorrelazione parziale (PACF) possiamo trarre alcune indicazioni utili per la scelta del modello:
+
+* Osservando un taglio netto nell’ACF al ritardo 1, al ritardo 4 e un decadimento esponenziale della PACF, questo suggerisce che un modello SARMA$(0,0,1)(0,0,1)_4$ potrebbe adattarsi bene ai dati.
+
+* Al contrario, se notiamo un taglio netto della PACF al ritardo 2 e un decadimento esponenziale dell’ACF, questo è coerente con un modello AR(2).
+
+Inoltre, dal grafico dell’ACF emerge una autocorrelazione significativa al lag 4, che, considerando che la serie è trimestrale, indica la presenza di una componente stagionale. Questo suggerisce che potremmo valutare anche modelli SARIMA, che includono sia la componente autoregressiva e media mobile sia quella stagionale.
+
+\newpage
+
+## SARMA$(0,1)(0,1)_4$
+
+```{r, echo=FALSE}
+fit_ma1 <- Arima(serie_diff, order = c(0,0,1),
+                seasonal = list(order = c(0, 0, 1), period = 4), # Parte stagionale (SMA1)
+                 include.mean = FALSE) 
+fit_ma1
+checkresiduals(fit_ma1$residuals)
+
+# coefficienti stimati
+coefs <- coef(fit_ma1)
+
+# errori standard
+se <- sqrt(diag(fit_ma1$var.coef))
+
+# combinazione in un data frame
+params <- data.frame(
+  term = names(coefs),
+  estimate = coefs,
+  se = se
+)
+
+# t-value
+params$t_value <- params$estimate / params$se
+
+# p-value (test a due code)
+params$p_value <- 2 * (1 - pnorm(abs(params$t_value)))
+```
+
+\newpage
+
+```{r echo=FALSE, warning=FALSE}
+knitr::kable(params)
+```
+
+
+La stima del modello evidenzia che entrambi i parametri sono statisticamente significativi al livello di confidenza del 5%, con p-value rispettivamente pari a 0.004 per la parte non stagionale (MA1) e 0.042 per quella stagionale (SMA1).
+
+Inoltre dal test di Ljung e Box emerge dal p value che non rifiutiamo l'ipotesi nulla. Quindi concludiamo che i residui non sono autocorrelati e si può approssimare ad un processo tipico di un white noise.
+
+## AR(2)
+
+```{r, echo=FALSE}
+fit_ar2 <- Arima(serie_diff, order = c(2,0,0),
+                 include.mean = FALSE) 
+fit_ar2
+checkresiduals(fit_ar2$residuals)
+
+# coefficienti stimati
+coefs <- coef(fit_ar2)
+
+# errori standard
+se <- sqrt(diag(fit_ar2$var.coef))
+
+# combinazione in un data frame
+params <- data.frame(
+  term = names(coefs),
+  estimate = coefs,
+  se = se
+)
+
+# t-value
+params$t_value <- params$estimate / params$se
+
+# p-value (test a due code)
+params$p_value <- 2 * (1 - pnorm(abs(params$t_value)))
+
+knitr::kable(params)
+```
+
+La stima del modello evidenzia che entrambi i parametri sono statisticamente significativi al livello di confidenza del 5%. 
+
+Inoltre dal test di Ljung e Box emerge dal p value che non rifiutiamo l'ipotesi nulla. Quindi concludiamo che i residui non sono autocorrelati e si può approssimare ad un processo tipico di un white noise.
+
+## SARMA$(1,1)(0,1)_4$
+
+Provo un modello in cui aggiungo un termine AR(1), poichè il decadimento della PACF potrebbe essere piuttosto lento. 
+
+```{r, echo=FALSE}
+fit_sarma1 <- Arima(serie_diff,
+                    order = c(1,0,1),                 # MA(1) non stagionale
+                    seasonal = list(order = c(0,0,1), period = 4),
+                    include.mean = FALSE)  # AR(1) e MA(1) stagionale
+fit_sarma1
+checkresiduals(fit_sarma1$residuals)
+
+# coefficienti stimati
+coefs <- coef(fit_sarma1)
+
+# errori standard
+se <- sqrt(diag(fit_sarma1$var.coef))
+
+# combinazione in un data frame
+params <- data.frame(
+  term = names(coefs),
+  estimate = coefs,
+  se = se
+)
+
+# t-value
+params$t_value <- params$estimate / params$se
+
+# p-value (test a due code)
+params$p_value <- 2 * (1 - pnorm(abs(params$t_value)))
+
+knitr::kable(params)
+```
+
+La stima del modello ARIMA(1,0,1)(0,0,1)$_4$ mostra una capacità superiore di rappresentare la dinamica della serie serie_diff. L'inclusione di un termine autoregressivo di primo ordine ($AR1 = 0.62$) ha permesso di modellare correttamente la persistenza iniziale rilevata nella PACF.
+
+Inoltre anche in questo caso non rifiutiamo l'ipotesi nulla del test di Ljung-Box nei residui concludendo l'assenza di autocorrelazione nei residui.
+
+Da notare in aggiunta che il modello così costruito presenta dei valori di AIC e BIC più bassi rispetto ai precedenti, suggerendo un buon fitting del modello. 
+
+
+## Confronto modelli
+
+Confrontiamo una serie di modelli per valori differenti di p, q, P, Q, e scegliamo quello che si adatta meglio ai nostri dati in base ai criteri di informazione
+
+```{r, echo=FALSE}
+# Funzione per confrontare modelli SARMA/SARIMA
+compare_sarma <- function(y, max_p = 3, max_q = 3, max_P = 1, max_Q = 1, d = 0, D = 0, s = 4) {
+  
+  results <- data.frame()
+  
+  for (p in 0:max_p) {
+    for (q in 0:max_q) {
+      for (P in 0:max_P) {
+        for (Q in 0:max_Q) {
+          # Prova a stimare il modello e ignora eventuali errori
+          fit <- tryCatch({
+            Arima(y,
+                  order = c(p,d,q),
+                  seasonal = list(order = c(P,D,Q), period = s))
+          }, error = function(e) NULL)
+          
+          if (!is.null(fit)) {
+            results <- rbind(results, data.frame(
+              p = p, d = d, q = q,
+              P = P, D = D, Q = Q, s = s,
+              AIC = fit$aic,
+              BIC = BIC(fit),
+              logLik = as.numeric(logLik(fit))
+            ))
+          }
+        }
+      }
+    }
+  }
+  
+  # Ordina per AIC crescente
+  results <- results %>% arrange(AIC)
+  return(results)
+}
+
+# Esempio di utilizzo
+res <- compare_sarma(serie_diff, max_p = 3, max_q = 3, max_P = 1, max_Q = 1, d = 0, D = 0, s = 4)
+kable(head(res))
+```
+
+Il modello che meglio si adatta meglio ai nostri dati valutando i diversi criteri di informazione è:
+
+$$
+Y^{'}_t \sim SARMA(1,1)(1,0)_4
+$$
+
+
+
+## Diagnostica del modello selezionato
+
+Valutiamo i coefficienti
+
+```{r, echo=FALSE}
+fit_sarma2 <- Arima(serie_diff,
+                    order = c(1,0,1),                 
+                    seasonal = list(order = c(1,0,0), period = 4),
+                    include.mean = FALSE)  
+fit_sarma2
+checkresiduals(fit_sarma2$residuals)
+
+# coefficienti stimati
+coefs <- coef(fit_sarma2)
+
+# errori standard
+se <- sqrt(diag(fit_sarma2$var.coef))
+
+# combinazione in un data frame
+params <- data.frame(
+  term = names(coefs),
+  estimate = coefs,
+  se = se
+)
+
+# t-value
+params$t_value <- params$estimate / params$se
+
+# p-value (test a due code)
+params$p_value <- 2 * (1 - pnorm(abs(params$t_value)))
+
+knitr::kable(params)
+```
+
+Il modello presenta risultati eccellenti sotto il profilo della significatività. 
+
+Tutti i coefficienti stimati sono statisticamente significativi per la soglia del 5%.
+
+\newpage
+
+## Analisi dei residui del seguente modello 
+
+```{r echo=FALSE, warning=FALSE}
+res_sarma2 <- residuals(fit_sarma2)
+res_sarma2 <- scale(res_sarma2)
+autoplot(res_sarma2) +
+  labs(
+    x = "Data",
+    y = "Residui",
+    title = "Residui del modello ARMA(2,1) nel tempo"
+  ) +
+  geom_hline(yintercept = c(-2, 2), color = "red", linetype = "dashed", size = 0.8)+
+  theme_minimal()
+```
+
+```{r echo=FALSE, warning=FALSE}
+autoplot(res_sarma2^2)+
+  labs(
+    x = "Data",
+    y = "Residui",
+    title = "Residui al quadrato del modello ARMA(2,1) nel tempo"
+  ) +
+  theme_minimal()
+  
+n_res <- sum(res_sarma2 <= 2 & res_sarma2>= -2)
+n_tot <- length(res_sarma2)
+val <- n_res / n_tot
+
+```
+
+L’analisi della serie temporale dei residui standardizzati mostra che non sono presenti trend evidenti, né variazioni sistematiche della varianza nel tempo. Inoltre, circa il `r round(val,3)`% dei residui risulta compreso nell’intervallo tra [–2; +2], come atteso sotto l’ipotesi di normalità con media zero e varianza unitaria. Questo suggerisce che, nel complesso, il modello ARMA produce residui compatibili con quelli di un processo white noise. 
+
+Inoltre, il grafico dei residui standardizzati al quadrato non evidenzia la presenza di **cluster**, ovvero periodi in cui valori elevati dei residui al quadrato tendono a essere seguiti da valori elevati (e viceversa).
+
+E dal test di Dickey-Fuller
+
+```{r echo=FALSE, warning=FALSE}
+result <- adf.test(res_sarma2)
+knitr::kable(data.frame(`Statistica Test` = result$statistic,
+           "p_value" = result$p.value,
+           "lag" = result$parameter))
+```
+
+Concludiamo che i residui sono stazionari, hanno una media prossima a 0 e una varianza costante. 
+
+\newpage
+
+
+Confrontiamo la distribuzione dei residui con i quantili teorici di una Normale, attraverso il **qq-plot**. 
+
+```{r echo=FALSE, warning=FALSE}
+qqnorm(res_sarma2)
+qqline(res_sarma2)
+```
+
+E dal test di Jarque-Bera:
+
+$$
+H_0 : \frac{\mu_3}{\sigma_3}=0 \quad H_1= \frac{\mu_4}{\sigma_4} - 3=0
+$$
+
+```{r, echo=FALSE}
+jarque.bera.test(res_sarma2)
+```
+
+Rifiutiamo $H_0$, quindi ipotesi di normalità, nonostante dall'analisi grafica i residui sembrano seguire un andamento Gaussiano, questo probabilmente è dovuto alla presenza di valori anomali nei dati che incidono sulla simmetria della serie storica.
+
+\newpage
+
+# Forecasting
+
+Per quanto riguarda la previsione di questa serie storica, avendo una frequenza 
+trimestrale si potrebbe pensare che le previsioni maggiormente utili siano quelle 
+fino ad un anno nel futuro, quindi con h = 1,2,3,4 in maniera da poter prevedere 
+con anticipo il tasso di occupazione e poter agire in anticipo.
+
+Al fine di garantire la confrontabilità dei risultati e una corretta interpretazione, le previsioni puntuali e i relativi intervalli di confidenza sono stati riportati alla scala originale della serie storica. 
+Poiché la fase di stima è stata condotta previa trasformazione di Box-Cox con parametro $\lambda = 0$ (trasformazione logaritmica), la semplice applicazione della funzione inversa (esponenziale) fornisce una stima della mediana e non della media. Quindi moltiplichiamo per un fattore di correzione, nel seguente modo:
+
+$$ \hat{X}_t(h) = exp(\hat{Y_t(h)}[1 +\frac{\hat{\sigma}^2_h }{2}]) $$
+
+Dopo aver suddiviso la nostra serie storica in un set di dati di training e uno di test, 
+iniziamo la nostra analisi.
+Consideriamo come test set le ultime 4 osservazioni, corrispondenti a un anno.
+I metodi benchmark che utilizziamo sono:
+
+- Naive: Tutte le previsioni sono uguali all’ultimo valore della serie storica;
+
+- Seasonal Naive: metodo analogo al precedente, in cui ciascuna previsione è uguale al valore osservato
+nello stesso periodo della stagionalità precedente;
+
+- Drift Method: un’estenzione del metodo naive che consente alle previsioni di crescere/decrescere incorporando un termine di drift che cattura l’andamento della serie.
+
+## Forecast con metodi benchmark
+
+```{r Previsione metodi benchmark, echo=FALSE, warning=FALSE}
+correzione <- function(prev){
+    V <- var(prev)
+    return(exp(prev)*(1+(V/2)))
+}
+# Suddivisione train e test set
+dim.test <- 8
+train.set <- head(log_dati, length(log_dati)-dim.test)
+test.set <-  tail(log_dati, dim.test)
+
+# Modelli
+fit.naive <- naive(train.set, h = dim.test)
+fit.snaive <- snaive(train.set, h = dim.test, drift = TRUE)
+fit.rwf <- rwf(train.set, h = dim.test, drift = TRUE)
+
+percentuale_zoom <- 0.5
+autoplot(tail(exp(log_dati), percentuale_zoom*length(log_dati)),) + 
+  autolayer(correzione(fit.naive$mean), series = "Naive") +
+  autolayer(correzione(fit.snaive$mean), series = "Seasonal Naive") +
+  autolayer(correzione(fit.rwf$mean), series = "Drift") +
+  labs(y = 'Numero occupati',
+       title = 'Forecast con metodi benchmark',
+       colour = 'Metodo') +
+   theme(
+    legend.position = c(1, 0.00),      # basso a destra
+    legend.justification = c("right", "bottom"),
+    legend.background = element_rect(
+      fill = "white",
+      colour = "black"
+    )
+  )
+
+err_prev_naive <- exp(test.set)-correzione(fit.naive$mean)
+err_prev_snaive <- exp(test.set)-correzione(fit.snaive$mean)
+err_prev_rwf <- exp(test.set)-correzione(fit.rwf$mean)
+```
+
+Mentre i modelli Naive e Drift falliscono nel rappresentare l'andamento della serie, il metodo Seasonal Naive si dimostra il benchmark più robusto, essendo l'unico in grado di modellizzare correttamente il pattern stagionale. Ovviamente questo comportamento va a riflettere la natura più semplice dei metodi benchmark considerati. 
+
+## Forecast con decomposizione STL
+
+```{r Previsione con STL, echo=FALSE, warning=FALSE}
+fit.stl <- stlf(train.set, h = dim.test, s.window = "periodic", robust = TRUE, level = c(80, 95))
+
+autoplot(tail(exp(log_dati), 0.25*length(log_dati))) +
+  autolayer(exp(fit.stl$mean)*(1 + (var(fit.stl$mean)/2)), series = 'STL bias adjusted') +
+  labs(
+    y = "Numero Occupati",
+    title = "Forecast con STL",
+    subtitle = "Previsione (Blu) e Test (Nero)") +
+   theme(
+    legend.position = c(1, 0.00),      # basso a destra
+    legend.justification = c("right", "bottom"),
+    legend.background = element_rect(
+      fill = "white",
+      colour = "black"
+    )
+  )
+
+err_prev_stl <- exp(test.set) - correzione(fit.stl$mean)
+```
+
+L'analisi grafica conferma l'efficacia della decomposizione STL (Seasonal-Trend decomposition using Loess). Grazie alla sua flessibilità, questo metodo riesce a catturare la dinamica non lineare della serie, garantendo una previsione coerente con il pattern storico. 
+
+## Forecast con $SARIMA(1,1,1)X(1,0,0)$
+
+```{r Previsione con SARIMA, echo=FALSE, warning=FALSE}
+fit.sarima <- arima(train.set, order = c(1,1,1),
+                    seasonal = list(order = c(1,0,0), period = 4),
+                    include.mean = FALSE)
+
+fit.sarima.prev <- forecast(fit.sarima, h = dim.test, level = c(80, 95),
+                            lambda = 0, biasadj = TRUE)
+
+autoplot(tail(exp(log_dati), 0.25*length(log_dati))) + 
+  autolayer(fit.sarima.prev, alpha = 0.25) + 
+  labs(y = 'Numero Occupati', title = TeX("Forecast con SARIMA$(1,1,1)x(1,0,0)_4$"))
+
+err_prev_sarima <- exp(test.set) - fit.sarima.prev$mean
+```
+
+Dal grafico emerge come le previsioni effettuate con il modello SARIMA$(1,1,1) \times (1,0,0)_{4}$ risultino coerenti con la serie storica osservata. Sebbene la traiettoria stimata appaia più regolare rispetto alla volatilità dei dati reali, il modello dimostra una buona capacità previsiva nel periodo di riferimento. 
+
+
+## Risultati 
+
+Calcoliamo indici di accuratezza previsiva sulle serie back transformed.  
+
+```{r Calcolo metriche, echo=FALSE, warning=FALSE}
+U1 <- function(prev, val){
+    n <- length(prev)
+    
+    num <- ( (sum((val - prev)^2))/n )^0.5
+    den1 <- ( sum(val^2)/n )^0.5
+    den2 <- ( sum(prev^2)/n )^0.5
+    
+    return(num/(den1+den2))
+}
+
+U2 <- function(prev, val){
+    n <- length(prev)
+    
+    n1 <- (prev[2:n]-val[2:n])/val[1:(n-1)]
+    num <- (sum(n1^2))^0.5
+    
+    n2 <- (val[2:n]-val[1:(n-1)])/val[1:(n-1)]
+    den <- (sum(n2^2))^0.5
+    
+    return(num/den)
+}
+
+evidenzia_minimi <- function(df) {
+  df_formattato <- df
+  
+  for(col in names(df)) {
+    if (col %in% c("p", "q", "P", "Q")){next}
+    else if(is.numeric(df[[col]])) {
+      min_val <- min(df[[col]], na.rm = TRUE)
+      df_formattato[[col]] <- ifelse(
+        df[[col]] == min_val,
+        cell_spec(df[[col]], bold = TRUE, color = "red", format = "latex"),
+        as.character(df[[col]])
+      )
+    }
+  }
+  return(df_formattato)
+}
+
+mae_naive <- MAE(err_prev_naive)
+rmse_naive <- RMSE(err_prev_naive)
+mape_naive <- mape(fit.naive$mean, test.set)
+u1_naive <- U1(fit.naive$mean, test.set)
+u2_naive <- U2(fit.naive$mean, test.set)
+
+mae_snaive <- MAE(err_prev_snaive)
+rmse_snaive <- RMSE(err_prev_snaive)
+mape_snaive <- mape(fit.snaive$mean, test.set)
+u1_snaive <- U1(fit.snaive$mean, test.set)
+u2_snaive <- U2(fit.snaive$mean, test.set)
+
+
+mae_rwf <- MAE(err_prev_rwf)
+rmse_rwf <- RMSE(err_prev_rwf)
+mape_rwf <- mape(fit.rwf$mean, test.set)
+u1_rwf <- U1(fit.rwf$mean, test.set)
+u2_rwf <- U2(fit.rwf$mean, test.set)
+
+mae_stl <- MAE(err_prev_stl)
+rmse_stl <- RMSE(err_prev_stl)
+mape_stl <- mape(fit.stl$mean, test.set)
+u1_stl <- U1(fit.stl$mean, test.set)
+u2_stl <- U2(fit.stl$mean, test.set)
+
+mae_arima <- MAE(err_prev_sarima)
+rmse_arima <- RMSE(err_prev_sarima)
+mape_arima <- mape(log(fit.sarima.prev$mean), test.set)
+u1_arima <- U1(log(fit.sarima.prev$mean), test.set)
+u2_arima <- U2(log(fit.sarima.prev$mean), test.set)
+
+c1 <- cbind(mae_naive, rmse_naive, mape_naive, u1_naive, u2_naive)
+c2 <- cbind(mae_snaive, rmse_naive, mape_snaive, u1_snaive, u2_snaive)
+c3 <- cbind(mae_rwf, rmse_rwf, mape_rwf, u1_rwf, u2_rwf)
+c4 <- cbind(mae_arima, rmse_arima, mape_arima, u1_arima, u2_arima)
+c5 <- cbind(mae_stl, rmse_stl, mape_stl, u1_stl, u2_stl)
+
+arrotondamento <- 5
+tab <- rbind(round(c1,arrotondamento),
+             round(c2,arrotondamento),
+             round(c3,arrotondamento),
+             round(c4,arrotondamento),
+             round(c5,arrotondamento))
+
+colnames(tab) <- c('MAE', 'RMSE', 'MAPE', 'U1', 'U2')
+rownames(tab) <- c('Naive', 'Seasonal Naive', 'RWF', "SARIMA(1,1,1)x(1,0,0)4", 'Decomposizione STL') 
+
+tab |> 
+  as.data.frame() |>
+  evidenzia_minimi() |>
+  kable(escape = FALSE, format = "latex", booktabs = TRUE) |>
+  kable_styling(latex_options  = "hold_position")
+```
+
+Dall'analisi comparativa degli indici di accuratezza previsiva emerge che il modello più performante è il SARIMA$(1,1,1) \times (1,0,0)_{4}$.
+Inoltre tra i modelli testati è l'unico che presenta un valore dell'indice di Theil $U_2 < 1$, questo indica che il modello è più efficace di una previsione ingenua(Naive). 
+
+\newpage
+
+# Conclusioni
+
+L’analisi della serie storica relativa al numero di occupati ha permesso di identificare i pattern e le dinamiche principali del fenomeno. La serie ha evidenziato un trend non lineare nel periodo di riferimento, caratterizzato da cicli di espansione e contrazione riconducibili a fattori esogeni, quali crisi finanziarie e shock macroeconomici. 
+Nonostante una componente stagionale presente, quest'ultima risulta meno marcata rispetto alla componente ciclica.
+In fase di modellizzazione:
+
+* Decomposizione STL: Si è dimostrata estremamente efficace nell’isolare le componenti di trend e stagionalità, riuscendo a isolare un residuo (remainder) assimilabile a un processo di White Noise.
+
+* Modello SARIMA $(1,1,1) \times (1,0,0)_{4}$: È risultato il più adeguato per descrivere la dinamica della serie e per effettuare previsioni a breve termine. Tuttavia, è emerso come la natura lineare di tale modello possa limitare la capacità di catturare pienamente dinamiche non lineari o shock improvvisi.
+
+* Confronto con i Benchmark: I metodi di previsione elementari (come il Naive o il Drift) hanno evidenziato i limiti dei modelli eccessivamente semplificati nel riprodurre i trend più recenti. Al contrario, le previsioni basate sulla decomposizione STL hanno offerto una rappresentazione più flessibile e aderente alla realtà, adattandosi meglio alle variazioni strutturali della serie.
+
+# Riferimenti
+ 
+1. Fonte dei dati: U.S. Bureau of Labor Statistics, Employed full time: Median usual weekly real earnings: Wage and salary workers: 16 years and over [LEU0252917000Q], retrieved from FRED, Federal Reserve Bank of St. Louis; https://fred.stlouisfed.org/series/LEU0252917000Q, May 22, 2024.
+
+
+
+
+
+
+
+
+
+
+
+
+
